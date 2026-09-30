@@ -1,0 +1,89 @@
+START
+ │
+ ▼
+Employee Context
+ │
+ │
+ ▼
+PREPARE
+ │
+ │
+ │ Manager says:
+ │ "I want to tell him he's been late too often."
+ │
+ ▼
+Coach helps structure it
+ │
+ ▼
+START REHEARSAL
+ │
+ ▼
+┌──────────────────────────────┐
+│                              │
+│ 🎤 MANAGER                   │
+│                              │
+│ "Rohit, I'd like to talk..." │
+│                              │
+│ 🔊 ROHIT                     │
+│                              │
+│ "I know I've been late..."   │
+│                              │
+│ 🎤 MANAGER                   │
+│                              │
+│ "But there have been..."     │
+│                              │
+└──────────────────────────────┘
+ │
+ ▼
+END REHEARSAL
+ │
+ ▼
+DEBRIEF
+ │
+ ├── Readiness
+ ├── What worked
+ ├── What didn't
+ ├── Tomorrow's opening
+ ├── Objection 1
+ └── Objection 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+Step 5 — We now have the three AI modes
+
+Your backend architecture is now:
+
+employee_record.json
+        │
+        ├──────────────────┐
+        │                  │
+        ▼                  ▼
+  Prepare Context     Employee Context
+        │                  │
+        ▼                  │
+ prepare_service.py       │
+        │                  │
+        ▼                  ▼
+     Mistral          rehearsal_service
+                           │
+                           ▼
+                         Rohit
+                           │
+                           ▼
+                     Conversation
+                           │
+                           ▼
+                    debrief_service
+                           │
+                           ▼
+                         Mistral

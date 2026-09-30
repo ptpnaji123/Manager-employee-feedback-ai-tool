@@ -1,0 +1,56 @@
+{
+  "_note": "Synthetic record. All names, figures and events are fictional.",
+  "employee_id": "E-2291",
+  "name": "Rohit Menon",
+  "role": "Senior Analyst, Client Servicing",
+  "tenure_months": 34,
+  "manager_id": "M-104",
+  "manager_name": "Aditi Rao",
+
+  "performance": {
+    "current_cycle_rating": "Meets expectations",
+    "previous_cycle_rating": "Exceeds expectations",
+    "trend": "declining",
+    "last_reviewed": "2026-07-15"
+  },
+
+  "goals": [
+    { "goal": "Reduce open ticket backlog below 20", "target": 20, "actual": 41, "period": "Q2 FY26", "status": "missed" },
+    { "goal": "Client CSAT score", "target": 4.2, "actual": 4.5, "period": "Q2 FY26", "status": "exceeded" },
+    { "goal": "Complete advanced product certification", "target": 1, "actual": 1, "period": "Q2 FY26", "status": "met" }
+  ],
+
+  "attendance": {
+    "scheduled_start": "09:30",
+    "late_arrivals_last_90_days": 14,
+    "average_lateness_minutes": 38,
+    "pattern_note": "Predominantly Mondays and Tuesdays",
+    "prior_conversation_logged": "2026-06-02, verbal, logged by manager, no written follow-up"
+  },
+
+  "feedback_360": {
+    "collection_note": "Collected under stated confidentiality to respondents.",
+    "verbatim_comments": [
+      "Rohit is technically excellent but has been noticeably withdrawn in team standups since around March. Not sure what changed. (peer)",
+      "He quietly covers for two other people on the team and nobody seems to notice or credit him for it. (peer)",
+      "Slow to respond on Slack, which slows the whole escalation chain. (peer)"
+    ],
+    "aggregated_themes": [
+      { "theme": "Technical credibility", "sentiment": "strongly positive", "respondents": 6 },
+      { "theme": "Responsiveness", "sentiment": "mixed to negative", "respondents": 6 },
+      { "theme": "Team engagement", "sentiment": "declining", "respondents": 6 }
+    ]
+  },
+
+  "hr_notes": [
+    { "date": "2026-03-12", "note": "Approved medical leave 12-26 March 2026." },
+    { "date": "2026-09-08", "note": "Flagged as potential flight risk by skip-level manager. Not disclosed to line manager." }
+  ],
+
+  "compensation": {
+    "band": "S3",
+    "last_increment_pct": 4.0,
+    "peer_band_median_increment_pct": 7.5,
+    "last_increment_date": "2026-04-01"
+  }
+}

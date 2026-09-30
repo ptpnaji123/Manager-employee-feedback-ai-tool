@@ -1,0 +1,29 @@
+{
+  "name": "Situation - Behaviour - Impact",
+  "steps": [
+    {
+      "name": "Situation",
+      "description": "Describe when and where the issue occurred specifically."
+    },
+    {
+      "name": "Behaviour",
+      "description": "Describe the observable action rather than characterising the person."
+    },
+    {
+      "name": "Impact",
+      "description": "Explain the concrete effect on the team, client or work."
+    },
+    {
+      "name": "Listen",
+      "description": "Give the employee an opportunity to explain their perspective."
+    },
+    {
+      "name": "Agree on change",
+      "description": "Agree on what should change."
+    },
+    {
+      "name": "Agree how it will be checked",
+      "description": "Agree how progress will be followed up."
+    }
+  ]
+}

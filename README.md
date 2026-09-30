@@ -220,24 +220,6 @@ This is a local prototype.
 
 For a production system, additional access control, encryption, retention policies, audit logging, and privacy controls would be required.
 
-## Design Decisions
-
-### Why Ollama + Mistral?
-
-The local model avoids dependence on an external LLM API and keeps the main LLM processing on the developer's machine.
-
-### Why Web Speech API?
-
-It provides a simple browser-native way to implement voice interaction without requiring a separate speech-processing backend.
-
-### Why Flask?
-
-Flask provides a lightweight backend for connecting the browser UI, employee context, prompt logic, and local LLM.
-
-### Why no database?
-
-Persistence was not required for the prototype. Keeping the transcript session-based also reduces unnecessary storage of sensitive conversation data.
-
 ## Important Note
 
 The SpeechRecognition implementation is browser-dependent. Depending on the browser and configuration, speech recognition may rely on an online recognition service. The LLM itself is local through Ollama.

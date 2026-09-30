@@ -2,3 +2,8 @@
 .env
 __pycache__/
 *.pyc
+llm_service.py
+test.py
+everything to know.txt
+terminal_syntax.txt
+things to know.txt

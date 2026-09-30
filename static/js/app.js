@@ -1,521 +1,193 @@
-// =========================================================
-// MANAGER FEEDBACK COACH
-// Main application JavaScript
-// =========================================================
-
+"use strict";
 
 // =========================================================
-// GLOBAL STATE
+// MANAGER FEEDBACK COACH - main application JavaScript
 // =========================================================
+
+// ---------------------------------------------------------
+// CONFIG  (tune turn-taking here)
+// ---------------------------------------------------------
+
+const CONFIG = {
+    RECOGNITION_LANG: "en-IN",
+
+    // true  = one long recognition session (no gaps between phrases, best for pauses)
+    // false = short sessions (use this if you see duplicated / repeating text)
+    CONTINUOUS: true,
+
+    // How long the manager must be silent before the turn is sent.
+    SILENCE_MS: 2000,             // normal finished-sounding sentence
+    SILENCE_MS_SHORT: 3000,       // very short utterance (probably still thinking)
+    SILENCE_MS_UNFINISHED: 3500,  // sentence ends on "and", "but", "because", ...
+    SHORT_TURN_WORDS: 5,
+
+    // Words needed before speech counts as an interruption (ignores tiny noises / echo)
+    BARGE_IN_MIN_WORDS: 2,
+
+    RESTART_DELAY_MS: 80
+};
+
+const UNFINISHED_ENDINGS = new Set([
+    "and", "but", "so", "because", "the", "a", "an", "to", "of", "um", "uh", "like",
+    "that", "which", "if", "or", "then", "with", "for", "i", "you", "is", "are", "we",
+    "it", "was", "in", "on", "at", "my", "your", "about"
+]);
+
+
+// ---------------------------------------------------------
+// STATE
+// ---------------------------------------------------------
 
 let conversation = [];
-
 let currentMode = "prepare";
 
 let meetingActive = false;
 let isGeneratingResponse = false;
+let meetingSessionId = 0;     // changes on every start / end -> stale responses are dropped
+let debriefRequestId = 0;
 
-// Speech recognition
+// speech recognition
 let recognition = null;
 let recognitionSupported = false;
 let recognitionRunning = false;
 let recognitionShouldRun = false;
-
 let recognitionSessionId = 0;
 let activeRecognitionSession = 0;
+let recognitionRestartTimer = null;
 
-let recognitionFinalText = "";
-let recognitionInterimText = "";
-
-let currentManagerSpeech = "";
-let interimManagerSpeech = "";
+let committedText = "";   // finished recognition sessions of the current manager turn
+let sessionText = "";     // text of the recognition session that is running now
 
 let managerIsSpeaking = false;
-
-// Employee speech / interruption
-let employeeSpeechStarted = false;
-let interruptionDetected = false;
-
-// Timers
-let recognitionRestartTimer = null;
 let silenceTimer = null;
 
-// Timing
-let meetingStartedAt = null;
-let responseGenerationStartedAt = null;
-
-// TTS generation guard
+// employee speech
+let employeeSpeechStarted = false;
 let speechGenerationId = 0;
+let currentRohit = null;  // { turn, el, full }
+let spokenIndex = 0;
+
+// timing
+let sendStartedAt = null;
+let llmFinishedAt = null;
+
+// voices
+let coachVoice = null;
+let rohitVoice = null;
+
+
+// ---------------------------------------------------------
+// DOM
+// ---------------------------------------------------------
+
+const $ = (id) => document.getElementById(id);
+
+const contextScreen = $("contextScreen");
+const workspace = $("workspace");
+
+const startPrepareButton = $("startPrepare");
+
+const preparePanel = $("preparePanel");
+const rehearsePanel = $("rehearsePanel");
+const debriefPanel = $("debriefPanel");
+
+const currentModeTitle = $("currentModeTitle");
+const currentModeDescription = $("currentModeDescription");
+const voiceStatusDot = $("voiceStatusDot");
+const voiceStatus = $("voiceStatus");
+
+const prepareInput = $("prepareInput");
+const prepareButton = $("prepareButton");
+const prepareResponse = $("prepareResult");
+
+const managerInput = $("managerInput");
+const sendButton = $("sendButton");
+const micButton = $("micButton");
+const transcript = $("transcript");
+
+const startMeetingButton = $("startMeeting");
+const endMeetingButton = $("endMeeting");
+const stopSpeakingButton = $("stopSpeakingButton");
+const turnStatus = $("turnStatus");
+const turnDescription = $("turnDescription");
+const liveMeetingCard = $("liveMeetingCard");
+const timeToFirstSound = $("timeToFirstSound");
+
+const debriefButton = $("debriefButton");
+const debriefResponse = $("debriefResult");
+const debriefTranscript = $("debriefTranscript");
+const modeBanner = $("modeBanner");
+const backToRehearseButton = $("backToRehearse");
 
 
 // =========================================================
-// DOM REFERENCES
+// INIT
 // =========================================================
 
-const contextScreen =
-    document.getElementById("contextScreen");
-
-const workspace =
-    document.getElementById("workspace");
-
-
-// ---------------------------------------------------------
-// Context buttons
-// ---------------------------------------------------------
-
-const startPrepareButton =
-    document.getElementById("startPrepare");
-
-const startRehearseButton =
-    document.getElementById("startRehearse");
-
-const goToRehearseButton =
-    document.getElementById("goToRehearse");
-
-
-// ---------------------------------------------------------
-// Panels
-// ---------------------------------------------------------
-
-const preparePanel =
-    document.getElementById("preparePanel");
-
-const rehearsePanel =
-    document.getElementById("rehearsePanel");
-
-const debriefPanel =
-    document.getElementById("debriefPanel");
-
-
-// ---------------------------------------------------------
-// Workspace header
-// ---------------------------------------------------------
-
-const currentModeTitle =
-    document.getElementById("currentModeTitle");
-
-const currentModeDescription =
-    document.getElementById("currentModeDescription");
-
-const voiceStatusDot =
-    document.getElementById("voiceStatusDot");
-
-const voiceStatus =
-    document.getElementById("voiceStatus");
-
-
-// ---------------------------------------------------------
-// Prepare
-// ---------------------------------------------------------
-
-const prepareInput =
-    document.getElementById("prepareInput");
-
-const prepareButton =
-    document.getElementById("prepareButton");
-
-const prepareResponse =
-    document.getElementById("prepareResult");
-
-
-// ---------------------------------------------------------
-// Rehearsal
-// ---------------------------------------------------------
-
-const managerInput =
-    document.getElementById("managerInput");
-
-const sendButton =
-    document.getElementById("sendButton");
-
-const micButton =
-    document.getElementById("micButton");
-
-const transcript =
-    document.getElementById("transcript");
-
-
-// ---------------------------------------------------------
-// Meeting controls
-// ---------------------------------------------------------
-
-const startMeetingButton =
-    document.getElementById("startMeeting");
-
-const endMeetingButton =
-    document.getElementById("endMeeting");
-
-const stopSpeakingButton =
-    document.getElementById("stopSpeakingButton");
-
-const finishRehearsalButton =
-    document.getElementById("finishRehearsal");
-
-const turnStatus =
-    document.getElementById("turnStatus");
-
-const turnDescription =
-    document.getElementById("turnDescription");
-
-const liveMeetingCard =
-    document.getElementById("liveMeetingCard");
-
-const timeToFirstSound =
-    document.getElementById("timeToFirstSound");
-
-
-// ---------------------------------------------------------
-// Debrief
-// ---------------------------------------------------------
-
-const debriefButton =
-    document.getElementById("debriefButton");
-
-const debriefResponse =
-    document.getElementById("debriefResult");
-
-const debriefTranscript =
-    document.getElementById("debriefTranscript");
-
-
-// =========================================================
-// INITIALIZATION
-// =========================================================
-
-document.addEventListener(
-    "DOMContentLoaded",
-    initializeApplication
-);
-
-
-function initializeApplication() {
-
-    console.log(
-        "Manager Feedback Coach initialized."
-    );
-
+document.addEventListener("DOMContentLoaded", () => {
     setupModeButtons();
-
     setupPrepare();
-
     setupRehearsal();
-
     setupMeetingControls();
-
     setupDebrief();
-
     setupSpeechRecognition();
-
+    setupVoices();
     showContextScreen();
-
-    updateWorkspaceHeader("prepare");
-
+    updateWorkspaceHeader("rehearse");
     updateRecognitionUI();
-
-}
+});
 
 
 // =========================================================
-// CONTEXT / WORKSPACE
+// SCREENS / MODES
 // =========================================================
 
 function showContextScreen() {
-
-    currentMode = "prepare";
-
-    if (contextScreen) {
-
-        contextScreen.classList.remove("hidden");
-
-        contextScreen.style.display = "block";
-
-    }
-
-    if (workspace) {
-
-        workspace.classList.add("hidden");
-
-        workspace.style.display = "none";
-
-    }
-
+    currentMode = "rehearse";
+    contextScreen.classList.remove("hidden");
+    workspace.classList.add("hidden");
 }
 
-
-// =========================================================
-// START WORKSPACE
-// =========================================================
-
-function startWorkspace(mode) {
-
-    console.log(
-        "Starting workspace:",
-        mode
-    );
-
-    currentMode = mode;
-
-    if (contextScreen) {
-
-        contextScreen.classList.add("hidden");
-
-        contextScreen.style.display = "none";
-
-    }
-
-    if (workspace) {
-
-        workspace.classList.remove("hidden");
-
-        workspace.style.display = "block";
-
-    }
-
-    showMode(mode);
-
+function startWorkspace() {
+    contextScreen.classList.add("hidden");
+    workspace.classList.remove("hidden");
+    showMode("rehearse");
+    prepareInput?.focus();
 }
 
-
-// =========================================================
-// SHOW MODE
-// =========================================================
-
+/**
+ * Prepare (left) is always visible.
+ * The right side shows either the Rehearse view or the Debrief view.
+ */
 function showMode(mode) {
+    currentMode = mode === "debrief" ? "debrief" : "rehearse";
 
-    if (
-        mode !== "prepare" &&
-        mode !== "rehearse" &&
-        mode !== "debrief"
-    ) {
+    rehearsePanel.classList.toggle("hidden", currentMode === "debrief");
+    debriefPanel.classList.toggle("hidden", currentMode !== "debrief");
 
-        mode = "prepare";
+    updateWorkspaceHeader(currentMode);
 
-    }
-
-    currentMode = mode;
-
-
-    // -----------------------------------------------------
-    // Prepare
-    // -----------------------------------------------------
-
-    if (preparePanel) {
-
-        const visible =
-            mode === "prepare";
-
-        preparePanel.classList.toggle(
-            "hidden",
-            !visible
-        );
-
-        preparePanel.style.display =
-            visible ? "block" : "none";
-
-    }
-
-
-    // -----------------------------------------------------
-    // Rehearse
-    // -----------------------------------------------------
-
-    if (rehearsePanel) {
-
-        const visible =
-            mode === "rehearse";
-
-        rehearsePanel.classList.toggle(
-            "hidden",
-            !visible
-        );
-
-        rehearsePanel.style.display =
-            visible ? "block" : "none";
-
-    }
-
-
-    // -----------------------------------------------------
-    // Debrief
-    // -----------------------------------------------------
-
-    if (debriefPanel) {
-
-        const visible =
-            mode === "debrief";
-
-        debriefPanel.classList.toggle(
-            "hidden",
-            !visible
-        );
-
-        debriefPanel.style.display =
-            visible ? "block" : "none";
-
-    }
-
-
-    // -----------------------------------------------------
-    // Navigation buttons
-    // -----------------------------------------------------
-
-    document
-        .querySelectorAll("[data-mode]")
-        .forEach((button) => {
-
-            button.classList.toggle(
-                "active",
-                button.dataset.mode === mode
-            );
-
-        });
-
-
-    updateWorkspaceHeader(mode);
-
-
-    if (mode === "debrief") {
-
-        updateDebriefTranscript();
-
-    }
-
+    if (currentMode === "debrief") updateDebriefTranscript();
 }
-
-
-// =========================================================
-// WORKSPACE HEADER
-// =========================================================
 
 function updateWorkspaceHeader(mode) {
+    const debrief = mode === "debrief";
 
-    if (
-        !currentModeTitle ||
-        !currentModeDescription
-    ) {
-
-        return;
-
-    }
-
-
-    if (mode === "prepare") {
-
-        currentModeTitle.textContent =
-            "Prepare";
-
-        currentModeDescription.textContent =
-            "Plan the conversation using Situation, Behaviour and Impact.";
-
-    }
-
-
-    if (mode === "rehearse") {
-
-        currentModeTitle.textContent =
-            "Rehearse";
-
-        currentModeDescription.textContent =
-            "Practise the conversation with Rohit using your voice.";
-
-    }
-
-
-    if (mode === "debrief") {
-
-        currentModeTitle.textContent =
-            "Debrief";
-
-        currentModeDescription.textContent =
-            "Review what actually happened in your rehearsal.";
-
-    }
-
+    modeBanner.className = `mode-banner ${debrief ? "debrief" : "rehearse"}`;
+    currentModeTitle.textContent = debrief ? "DEBRIEF" : "REHEARSE";
+    currentModeDescription.textContent = debrief
+        ? "Rohit has left. This is the coach, based only on what you said."
+        : "You are talking to Rohit (simulated).";
 }
 
-
-// =========================================================
-// MODE BUTTONS
-// =========================================================
-
 function setupModeButtons() {
+    startPrepareButton?.addEventListener("click", startWorkspace);
 
-    if (startPrepareButton) {
-
-        startPrepareButton.addEventListener(
-            "click",
-            () => {
-
-                startWorkspace("prepare");
-
-            }
-        );
-
-    }
-
-
-    if (startRehearseButton) {
-
-        startRehearseButton.addEventListener(
-            "click",
-            () => {
-
-                startWorkspace("rehearse");
-
-            }
-        );
-
-    }
-
-
-    if (goToRehearseButton) {
-
-        goToRehearseButton.addEventListener(
-            "click",
-            () => {
-
-                startWorkspace("rehearse");
-
-            }
-        );
-
-    }
-
-
-    document
-        .querySelectorAll("[data-mode]")
-        .forEach((button) => {
-
-            button.addEventListener(
-                "click",
-                () => {
-
-                    const mode =
-                        button.dataset.mode;
-
-
-                    if (
-                        meetingActive &&
-                        mode !== "rehearse"
-                    ) {
-
-                        updateTurnStatus(
-                            "Meeting still active",
-                            "Finish the rehearsal before changing modes."
-                        );
-
-                        return;
-
-                    }
-
-
-                    showMode(mode);
-
-                }
-            );
-
-        });
-
+    backToRehearseButton?.addEventListener("click", () => {
+        if (meetingActive) return;
+        showMode("rehearse");
+        updateTurnStatus("Ready to start", "Press Start, then speak.");
+    });
 }
 
 
@@ -523,1892 +195,614 @@ function setupModeButtons() {
 // PREPARE
 // =========================================================
 
+// Prepare is a short chat: the coach remembers earlier messages, so the manager can follow up.
+let prepareHistory = [];
+
+const PREPARE_SUGGESTIONS = [
+    "Plan the conversation",
+    "Write my opening line",
+    "Give me 5 questions to ask",
+    "What if he gets defensive?"
+];
+
 function setupPrepare() {
+    if (!prepareButton || !prepareInput) return;
 
-    if (!prepareButton) {
+    // quick-start buttons (click, then edit the text and add your own details)
+    const chips = document.createElement("div");
+    chips.className = "chips";
 
-        return;
+    PREPARE_SUGGESTIONS.forEach((label) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "secondary-button";
+        chip.style.cssText = "min-height:28px;padding:0 10px;font-size:12px;font-weight:500;";
+        chip.textContent = label;
+        chip.addEventListener("click", () => {
+            prepareInput.value = label;
+            prepareInput.focus();
+        });
+        chips.appendChild(chip);
+    });
 
-    }
+    prepareInput.parentNode.insertBefore(chips, prepareInput);
 
+    // "start over" button
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "secondary-button";
+    reset.textContent = "Start over";
+    reset.addEventListener("click", () => {
+        prepareHistory = [];
+        prepareResponse.innerHTML = "";
+        prepareInput.value = "";
+    });
+    prepareButton.parentNode.insertBefore(reset, prepareButton);
+    
+    prepareButton.addEventListener("click", sendPrepareMessage);
 
-    prepareButton.addEventListener(
-        "click",
-        async () => {
-
-            const message =
-                prepareInput
-                    ? prepareInput.value.trim()
-                    : "";
-
-
-            if (!message) {
-
-                showPrepareMessage(
-                    "Please describe what you want help with."
-                );
-
-                return;
-
-            }
-
-
-            prepareButton.disabled =
-                true;
-
-
-            showPrepareMessage(
-                "Thinking..."
-            );
-
-
-            try {
-
-                const response =
-                    await fetch(
-                        "/api/prepare",
-                        {
-                            method: "POST",
-
-                            headers: {
-                                "Content-Type":
-                                    "application/json"
-                            },
-
-                            body: JSON.stringify({
-                                message: message
-                            })
-
-                        }
-                    );
-
-
-                const data =
-                    await response.json();
-
-
-                if (!response.ok) {
-
-                    throw new Error(
-                        data.error ||
-                        "Prepare request failed."
-                    );
-
-                }
-
-
-                showPrepareMessage(
-                    data.response ||
-                    "No preparation response returned."
-                );
-
-
-            } catch (error) {
-
-                console.error(
-                    "Prepare error:",
-                    error
-                );
-
-
-                showPrepareMessage(
-                    `Error: ${error.message}`
-                );
-
-
-            } finally {
-
-                prepareButton.disabled =
-                    false;
-
-            }
-
+    prepareInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            sendPrepareMessage();
         }
-    );
-
+    });
 }
 
+async function sendPrepareMessage() {
+    const message = prepareInput.value.trim();
 
-function showPrepareMessage(message) {
-
-    if (!prepareResponse) {
-
+    if (!message) {
+        appendPrepareEntry("coach", "Please describe what you want help with, or pick one of the buttons above.");
         return;
-
     }
 
-    prepareResponse.style.display =
-        "block";
-
-    prepareResponse.textContent =
-        message;
-
-}
-
-
-// =========================================================
-// SPEECH RECOGNITION SETUP
-// =========================================================
-
-function setupSpeechRecognition() {
-
-    const SpeechRecognition =
-        window.SpeechRecognition ||
-        window.webkitSpeechRecognition;
-
-
-    if (!SpeechRecognition) {
-
-        console.warn(
-            "Speech recognition is not supported by this browser."
-        );
-
-        recognitionSupported =
-            false;
-
-        if (micButton) {
-
-            micButton.disabled =
-                true;
-
-            micButton.textContent =
-                "Mic unavailable";
-
-        }
-
-        updateVoiceStatus(
-            "Voice unavailable"
-        );
-
-        return;
-
-    }
-
-
-    recognitionSupported =
-        true;
-
-
-    if (micButton) {
-
-        micButton.addEventListener(
-            "click",
-            toggleMicrophone
-        );
-
-    }
-
-
-    console.log(
-        "Speech recognition supported."
-    );
-
-}
-
-
-// =========================================================
-// MICROPHONE TOGGLE
-// =========================================================
-
-function toggleMicrophone() {
-
-    if (!recognitionSupported) {
-
-        return;
-
-    }
-
-
-    if (recognitionRunning) {
-
-        stopRecognition();
-
-
-        updateTurnStatus(
-            "Microphone paused",
-            "Press Speak to listen again."
-        );
-
-
-        updateVoiceStatus(
-            "Ready"
-        );
-
-
-        return;
-
-    }
-
-
-    if (!meetingActive) {
-
-        updateTurnStatus(
-            "Start the meeting first",
-            "Press Start Meeting before using the microphone."
-        );
-
-        return;
-
-    }
-
-
-    recognitionShouldRun =
-        true;
-
-
-    resetRecognitionBuffer();
-
-    startRecognition();
-
-
-    updateTurnStatus(
-        "Listening",
-        "Speak naturally."
-    );
-
-
-    updateVoiceStatus(
-        "Listening"
-    );
-
-}
-
-
-// =========================================================
-// CREATE RECOGNITION INSTANCE
-// =========================================================
-
-function createRecognitionInstance() {
-
-    const SpeechRecognition =
-        window.SpeechRecognition ||
-        window.webkitSpeechRecognition;
-
-
-    if (!SpeechRecognition) {
-
-        return null;
-
-    }
-
-
-    const instance =
-        new SpeechRecognition();
-
-
-    // IMPORTANT:
-    // Short sessions prevent Chrome from returning
-    // increasingly duplicated rolling transcripts.
-    instance.continuous =
-        false;
-
-    instance.interimResults =
-        true;
-
-    instance.maxAlternatives =
-        1;
-
-    instance.lang =
-        "en-IN";
-
-
-    const sessionId =
-        ++recognitionSessionId;
-
-
-    activeRecognitionSession =
-        sessionId;
-
-
-    instance.onstart =
-        () => {
-
-            if (
-                sessionId !==
-                activeRecognitionSession
-            ) {
-
-                return;
-
-            }
-
-
-            recognitionRunning =
-                true;
-
-
-            console.log(
-                "Recognition started:",
-                sessionId
-            );
-
-
-            updateRecognitionUI();
-
-        };
-
-
-    instance.onresult =
-        (event) => {
-
-            if (
-                sessionId !==
-                activeRecognitionSession
-            ) {
-
-                return;
-
-            }
-
-
-            handleRecognitionResult(
-                event
-            );
-
-        };
-
-
-    instance.onerror =
-        (event) => {
-
-            if (
-                sessionId !==
-                activeRecognitionSession
-            ) {
-
-                return;
-
-            }
-
-
-            console.warn(
-                "Speech recognition error:",
-                event.error
-            );
-
-
-            recognitionRunning =
-                false;
-
-
-            updateRecognitionUI();
-
-
-            if (
-                event.error === "not-allowed" ||
-                event.error === "service-not-allowed"
-            ) {
-
-                recognitionShouldRun =
-                    false;
-
-
-                updateVoiceStatus(
-                    "Microphone permission required"
-                );
-
-
-                updateTurnStatus(
-                    "Microphone permission required",
-                    "Allow microphone access in your browser."
-                );
-
-
-                return;
-
-            }
-
-
-            if (
-                recognitionShouldRun
-            ) {
-
-                scheduleRecognitionRestart();
-
-            }
-
-        };
-
-
-    instance.onend =
-        () => {
-
-            if (
-                sessionId !==
-                activeRecognitionSession
-            ) {
-
-                return;
-
-            }
-
-
-            recognitionRunning =
-                false;
-
-
-            updateRecognitionUI();
-
-
-            /*
-             * If the session ended naturally,
-             * create a completely new session.
-             */
-            if (
-                recognitionShouldRun &&
-                meetingActive
-            ) {
-
-                scheduleRecognitionRestart();
-
-            }
-
-        };
-
-
-    return instance;
-
-}
-
-
-// =========================================================
-// START RECOGNITION
-// =========================================================
-
-function startRecognition() {
-
-    if (!recognitionSupported) {
-
-        return;
-
-    }
-
-
-    if (!recognitionShouldRun) {
-
-        return;
-
-    }
-
-
-    if (!meetingActive) {
-
-        return;
-
-    }
-
-
-    if (recognitionRunning) {
-
-        return;
-
-    }
-
-
-    if (recognitionRestartTimer) {
-
-        clearTimeout(
-            recognitionRestartTimer
-        );
-
-        recognitionRestartTimer =
-            null;
-
-    }
-
-
-    recognition =
-        createRecognitionInstance();
-
-
-    if (!recognition) {
-
-        return;
-
-    }
-
+    const historyForRequest = prepareHistory.slice();
+
+    prepareButton.disabled = true;
+    appendPrepareEntry("manager", message);
+    const pending = appendPrepareEntry("coach", "Thinking...");
+    prepareInput.value = "";
 
     try {
+        const response = await fetch("/api/prepare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, history: historyForRequest })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Prepare request failed.");
 
-        recognition.start();
+        const answer = data.response || "No preparation response returned.";
+        pending.textContent = answer;
+
+        prepareHistory.push({ role: "manager", text: message });
+        prepareHistory.push({ role: "coach", text: answer });
 
     } catch (error) {
-
-        console.warn(
-            "Recognition start error:",
-            error.message
-        );
-
-
-        recognitionRunning =
-            false;
-
-
-        scheduleRecognitionRestart();
-
+        console.error("Prepare error:", error);
+        pending.textContent = `Error: ${error.message}`;
+        prepareInput.value = message; // give the text back so nothing is lost
+    } finally {
+        prepareButton.disabled = false;
     }
+}
 
+function appendPrepareEntry(who, text) {
+    const block = document.createElement("div");
+    block.className = `chat-entry ${who}`;
+
+    const label = document.createElement("div");
+    label.className = "chat-who";
+    label.textContent = who === "manager" ? "You" : "Coach";
+
+    const body = document.createElement("div");
+    body.className = "chat-text";
+    body.textContent = text;
+
+    block.appendChild(label);
+    block.appendChild(body);
+    prepareResponse.appendChild(block);
+    prepareResponse.scrollTop = prepareResponse.scrollHeight;
+
+    return body;
 }
 
 
 // =========================================================
-// STOP RECOGNITION
-// =========================================================
-
-function stopRecognition() {
-
-    recognitionShouldRun =
-        false;
-
-
-    if (recognitionRestartTimer) {
-
-        clearTimeout(
-            recognitionRestartTimer
-        );
-
-        recognitionRestartTimer =
-            null;
-
-    }
-
-
-    /*
-     * Invalidate the current session first.
-     *
-     * This prevents late browser events from
-     * entering the next manager turn.
-     */
-    activeRecognitionSession =
-        ++recognitionSessionId;
-
-
-    if (recognition) {
-
-        try {
-
-            recognition.stop();
-
-        } catch (error) {
-
-            console.warn(
-                "Recognition stop error:",
-                error.message
-            );
-
-        }
-
-    }
-
-
-    recognitionRunning =
-        false;
-
-
-    updateRecognitionUI();
-
-}
-
-
-// =========================================================
-// RESTART RECOGNITION
-// =========================================================
-
-function scheduleRecognitionRestart() {
-
-    if (!recognitionShouldRun) {
-
-        return;
-
-    }
-
-
-    if (!meetingActive) {
-
-        return;
-
-    }
-
-
-    if (recognitionRestartTimer) {
-
-        return;
-
-    }
-
-
-    recognitionRestartTimer =
-        setTimeout(
-            () => {
-
-                recognitionRestartTimer =
-                    null;
-
-
-                if (
-                    !recognitionShouldRun ||
-                    !meetingActive ||
-                    recognitionRunning
-                ) {
-
-                    return;
-
-                }
-
-
-                startRecognition();
-
-            },
-            200
-        );
-
-}
-
-
-// =========================================================
-// RESET RECOGNITION BUFFER
-// =========================================================
-
-function resetRecognitionBuffer() {
-
-    recognitionFinalText =
-        "";
-
-    recognitionInterimText =
-        "";
-
-    currentManagerSpeech =
-        "";
-
-    interimManagerSpeech =
-        "";
-
-}
-
-
-// =========================================================
-// NORMALIZE SPEECH TEXT
+// TEXT HELPERS
 // =========================================================
 
 function normalizeSpeechText(text) {
+    return String(text || "").replace(/\s+/g, " ").trim();
+}
 
-    return String(text || "")
-        .replace(/\s+/g, " ")
-        .trim();
+function wordCount(text) {
+    const t = normalizeSpeechText(text);
+    return t ? t.split(" ").length : 0;
+}
 
+/** Joins two pieces of text, removing an overlap at the seam (protects against repeated phrases). */
+function mergeWithoutDuplication(existing, incoming) {
+    existing = normalizeSpeechText(existing);
+    incoming = normalizeSpeechText(incoming);
+
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+
+    const e = existing.toLowerCase();
+    const i = incoming.toLowerCase();
+
+    if (e === i || e.includes(i)) return existing;
+    if (i.includes(e)) return incoming;
+
+    const ew = existing.split(" ");
+    const iw = incoming.split(" ");
+    const max = Math.min(ew.length, iw.length);
+
+    for (let size = max; size >= 1; size--) {
+        const end = ew.slice(ew.length - size).join(" ").toLowerCase();
+        const start = iw.slice(0, size).join(" ").toLowerCase();
+        if (end === start) {
+            const rest = iw.slice(size).join(" ");
+            return rest ? `${existing} ${rest}` : existing;
+        }
+    }
+    return `${existing} ${incoming}`;
+}
+
+function currentSpeech() {
+    return normalizeSpeechText(mergeWithoutDuplication(committedText, sessionText));
 }
 
 
 // =========================================================
-// MERGE TEXT WITHOUT DUPLICATION
+// SPEECH RECOGNITION
 // =========================================================
 
-function mergeWithoutDuplication(
-    existing,
-    incoming
-) {
+function setupSpeechRecognition() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    existing =
-        normalizeSpeechText(existing);
-
-
-    incoming =
-        normalizeSpeechText(incoming);
-
-
-    if (!existing) {
-
-        return incoming;
-
+    if (!SR) {
+        recognitionSupported = false;
+        micButton.disabled = true;
+        micButton.textContent = "Mic unavailable";
+        updateVoiceStatus("Voice unavailable");
+        return;
     }
 
+    recognitionSupported = true;
+    micButton.addEventListener("click", toggleMicrophone);
+}
 
-    if (!incoming) {
+function toggleMicrophone() {
+    if (!recognitionSupported) return;
 
-        return existing;
-
+    if (recognitionRunning) {
+        stopRecognition();
+        updateTurnStatus("Microphone paused", "Press Speak to listen again.");
+        updateVoiceStatus("Ready");
+        return;
     }
 
-
-    const existingLower =
-        existing.toLowerCase();
-
-    const incomingLower =
-        incoming.toLowerCase();
-
-
-    // Exact duplicate
-    if (
-        existingLower ===
-        incomingLower
-    ) {
-
-        return existing;
-
+    if (!meetingActive) {
+        updateTurnStatus("Start the meeting first", "Press Start Meeting before using the microphone.");
+        return;
     }
 
+    startManagerListening(true);
+}
 
-    // Incoming is already inside existing
-    if (
-        existingLower.includes(
-            incomingLower
-        )
-    ) {
+function createRecognitionInstance() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
 
-        return existing;
+    const instance = new SR();
+    instance.continuous = CONFIG.CONTINUOUS;
+    instance.interimResults = true;
+    instance.maxAlternatives = 1;
+    instance.lang = CONFIG.RECOGNITION_LANG;
 
-    }
+    const id = ++recognitionSessionId;
+    activeRecognitionSession = id;
+    const live = () => id === activeRecognitionSession;
 
+    instance.onstart = () => {
+        if (!live()) return;
+        recognitionRunning = true;
+        updateRecognitionUI();
+    };
 
-    // Existing is already inside incoming
-    if (
-        incomingLower.includes(
-            existingLower
-        )
-    ) {
+    // The manager is making sound again -> they are NOT finished. Cancel the pending send.
+    instance.onspeechstart = () => {
+        if (!live()) return;
+        clearSilenceTimer();
+    };
 
-        return incoming;
+    // Sound stopped -> start counting silence.
+    instance.onspeechend = () => {
+        if (!live()) return;
+        armSilenceTimer();
+    };
 
-    }
+    instance.onresult = (event) => {
+        if (!live()) return;
+        handleRecognitionResult(event);
+    };
 
+    instance.onerror = (event) => {
+        if (!live()) return;
 
-    /*
-     * Find overlap between the end of existing
-     * and beginning of incoming.
-     */
-    const existingWords =
-        existing.split(/\s+/);
+        console.warn("Speech recognition error:", event.error);
+        recognitionRunning = false;
+        commitSession();
+        updateRecognitionUI();
 
-    const incomingWords =
-        incoming.split(/\s+/);
-
-
-    const maxOverlap =
-        Math.min(
-            existingWords.length,
-            incomingWords.length
-        );
-
-
-    for (
-        let size = maxOverlap;
-        size >= 1;
-        size--
-    ) {
-
-        const existingEnd =
-            existingWords
-                .slice(
-                    existingWords.length - size
-                )
-                .join(" ")
-                .toLowerCase();
-
-
-        const incomingStart =
-            incomingWords
-                .slice(
-                    0,
-                    size
-                )
-                .join(" ")
-                .toLowerCase();
-
-
-        if (
-            existingEnd ===
-            incomingStart
-        ) {
-
-            const remaining =
-                incomingWords
-                    .slice(size)
-                    .join(" ");
-
-
-            if (!remaining) {
-
-                return existing;
-
-            }
-
-
-            return normalizeSpeechText(
-                `${existing} ${remaining}`
-            );
-
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+            recognitionShouldRun = false;
+            updateVoiceStatus("Microphone permission required");
+            updateTurnStatus("Microphone permission required", "Allow microphone access in your browser.");
+            return;
         }
 
-    }
+        if (recognitionShouldRun && meetingActive) scheduleRecognitionRestart();
+    };
 
+    instance.onend = () => {
+        if (!live()) return;
+        recognitionRunning = false;
+        commitSession();
+        updateRecognitionUI();
 
-    return normalizeSpeechText(
-        `${existing} ${incoming}`
-    );
+        if (recognitionShouldRun && meetingActive) scheduleRecognitionRestart();
+    };
 
+    return instance;
 }
 
-
-// =========================================================
-// CHECK CONTAINMENT
-// =========================================================
-
-function isAlreadyContained(
-    text,
-    existing
-) {
-
-    text =
-        normalizeSpeechText(text);
-
-    existing =
-        normalizeSpeechText(existing);
-
-
-    if (
-        !text ||
-        !existing
-    ) {
-
-        return false;
-
-    }
-
-
-    const textLower =
-        text.toLowerCase();
-
-    const existingLower =
-        existing.toLowerCase();
-
-
-    return (
-        existingLower.includes(textLower) ||
-        textLower.includes(existingLower)
-    );
-
+/** A recognition session finished: keep its text, start the next session with an empty buffer. */
+function commitSession() {
+    committedText = mergeWithoutDuplication(committedText, sessionText);
+    sessionText = "";
 }
 
+function startRecognition() {
+    if (!recognitionSupported || !recognitionShouldRun || !meetingActive || recognitionRunning) return;
 
-// =========================================================
-// HANDLE SPEECH RECOGNITION RESULT
-// =========================================================
+    if (recognitionRestartTimer) {
+        clearTimeout(recognitionRestartTimer);
+        recognitionRestartTimer = null;
+    }
+
+    recognition = createRecognitionInstance();
+    if (!recognition) return;
+
+    try {
+        recognition.start();
+    } catch (error) {
+        console.warn("Recognition start error:", error.message);
+        recognitionRunning = false;
+        scheduleRecognitionRestart();
+    }
+}
+
+function stopRecognition() {
+    recognitionShouldRun = false;
+
+    if (recognitionRestartTimer) {
+        clearTimeout(recognitionRestartTimer);
+        recognitionRestartTimer = null;
+    }
+
+    // invalidate the current session so late events cannot leak into the next turn
+    activeRecognitionSession = ++recognitionSessionId;
+
+    if (recognition) {
+        try { recognition.abort(); } catch (error) { /* ignore */ }
+    }
+
+    recognitionRunning = false;
+    updateRecognitionUI();
+}
+
+function scheduleRecognitionRestart() {
+    if (!recognitionShouldRun || !meetingActive || recognitionRestartTimer) return;
+
+    recognitionRestartTimer = setTimeout(() => {
+        recognitionRestartTimer = null;
+        if (!recognitionShouldRun || !meetingActive || recognitionRunning) return;
+        startRecognition();
+    }, CONFIG.RESTART_DELAY_MS);
+}
+
+/** Throw away everything heard so far (e.g. Rohit's voice picked up by the mic) and listen fresh. */
+function restartRecognitionFresh() {
+    stopRecognition();
+    clearManagerSpeechState();
+    recognitionShouldRun = true;
+    scheduleRecognitionRestart();
+}
 
 function handleRecognitionResult(event) {
+    if (!event.results) return;
 
-    if (!event.results) {
-
-        return;
-
-    }
-
-
-    /*
-     * With continuous=false, each recognition instance
-     * is intentionally short.
-     *
-     * We process final results separately from interim
-     * results.
-     */
-    let finalText = "";
-
-    let interimText = "";
-
-
-    for (
-        let i = 0;
-        i < event.results.length;
-        i++
-    ) {
-
-        const result =
-            event.results[i];
-
-
-        if (
-            !result ||
-            !result[0]
-        ) {
-
-            continue;
-
-        }
-
-
-        const text =
-            normalizeSpeechText(
-                result[0].transcript
-            );
-
-
-        if (!text) {
-
-            continue;
-
-        }
-
-
-        if (result.isFinal) {
-
-            finalText =
-                mergeWithoutDuplication(
-                    finalText,
-                    text
-                );
-
-        } else {
-
-            interimText =
-                mergeWithoutDuplication(
-                    interimText,
-                    text
-                );
-
-        }
-
-    }
-
-
-    finalText =
-        normalizeSpeechText(
-            finalText
-        );
-
-
-    interimText =
-        normalizeSpeechText(
-            interimText
-        );
-
-
-    /*
-     * -----------------------------------------------------
-     * BARGE-IN
-     * -----------------------------------------------------
-     */
-
-    if (
-        employeeSpeechStarted &&
-        (
-            finalText ||
-            interimText
-        )
-    ) {
-
-        handleManagerInterruption();
-
-    }
-
-
-    /*
-     * -----------------------------------------------------
-     * FINAL SPEECH
-     * -----------------------------------------------------
-     */
-
-    if (finalText) {
-
-        managerIsSpeaking =
-            true;
-
-
-        /*
-         * Add final speech exactly once.
-         */
-        recognitionFinalText =
-            mergeWithoutDuplication(
-                recognitionFinalText,
-                finalText
-            );
-
-
-        currentManagerSpeech =
-            normalizeSpeechText(
-                recognitionFinalText
-            );
-
-
-        recognitionInterimText =
-            "";
-
-        interimManagerSpeech =
-            "";
-
-
-        updateManagerInput(
-            currentManagerSpeech
-        );
-
-
-        updateTurnStatus(
-            "You're speaking",
-            "Rohit is listening."
-        );
-
-
-        updateVoiceStatus(
-            "Listening"
-        );
-
-
-        resetManagerSilenceTimer();
-
-    }
-
-
-    /*
-     * -----------------------------------------------------
-     * INTERIM SPEECH
-     * -----------------------------------------------------
-     */
-
-    if (interimText) {
-
-        managerIsSpeaking =
-            true;
-
-
-        recognitionInterimText =
-            interimText;
-
-
-        interimManagerSpeech =
-            interimText;
-
-
-        updateManagerInput(
-            combineFinalAndInterimSpeech()
-        );
-
-
-        updateTurnStatus(
-            "You're speaking",
-            "Rohit is listening."
-        );
-
-
-        updateVoiceStatus(
-            "Listening"
-        );
-
-
-        resetManagerSilenceTimer();
-
-    }
-
-}
-
-
-// =========================================================
-// COMBINE FINAL + INTERIM
-// =========================================================
-
-function combineFinalAndInterimSpeech() {
-
-    const finalText =
-        normalizeSpeechText(
-            recognitionFinalText
-        );
-
-
-    const interimText =
-        normalizeSpeechText(
-            recognitionInterimText
-        );
-
-
-    if (!finalText) {
-
-        return interimText;
-
-    }
-
-
-    if (!interimText) {
-
-        return finalText;
-
-    }
-
-
-    /*
-     * Do not duplicate interim text when Chrome has
-     * already included it in the final result.
-     */
-    if (
-        isAlreadyContained(
-            interimText,
-            finalText
-        )
-    ) {
-
-        return (
-            interimText.length >
-            finalText.length
-        )
-            ? interimText
-            : finalText;
-
-    }
-
-
-    return mergeWithoutDuplication(
-        finalText,
-        interimText
+    sessionText = normalizeSpeechText(
+        Array.from(event.results).map((r) => (r[0] ? r[0].transcript : "")).join(" ")
     );
 
+    const text = currentSpeech();
+    if (!text) return;
+
+    // ---- barge-in ----
+    if (employeeSpeechStarted) {
+        if (wordCount(text) < CONFIG.BARGE_IN_MIN_WORDS) return;
+        handleManagerInterruption();
+    }
+
+    managerIsSpeaking = true;
+    updateManagerInput(text);
+    updateTurnStatus("You're speaking", "Rohit is listening. He replies after you pause (or press Send).");
+    updateVoiceStatus("Listening");
+
+    armSilenceTimer();
 }
 
 
 // =========================================================
-// MANAGER INTERRUPTION / BARGE-IN
+// TURN-TAKING  (silence detection with an adaptive delay)
+// =========================================================
+
+function silenceDelay(text) {
+    const words = normalizeSpeechText(text).toLowerCase().split(" ").filter(Boolean);
+    const last = (words[words.length - 1] || "").replace(/[^a-z']/g, "");
+
+    if (UNFINISHED_ENDINGS.has(last)) return CONFIG.SILENCE_MS_UNFINISHED; // sentence obviously unfinished
+    if (words.length < CONFIG.SHORT_TURN_WORDS) return CONFIG.SILENCE_MS_SHORT;
+    return CONFIG.SILENCE_MS;
+}
+
+function clearSilenceTimer() {
+    if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+    }
+}
+
+function armSilenceTimer() {
+    clearSilenceTimer();
+
+    if (!meetingActive || !managerIsSpeaking) return;
+
+    silenceTimer = setTimeout(() => {
+        silenceTimer = null;
+        if (managerIsSpeaking && !employeeSpeechStarted && !isGeneratingResponse && meetingActive) {
+            finishManagerTurn();
+        }
+    }, silenceDelay(currentSpeech()));
+}
+
+function finishManagerTurn() {
+    if (isGeneratingResponse) return;
+
+    const message = currentSpeech();
+    if (!message) return;
+
+    console.log("FINAL MANAGER TURN:", message);
+
+    // stop the mic BEFORE sending so late events cannot change the message
+    stopRecognition();
+    clearManagerSpeechState();
+    sendManagerMessage(message);
+}
+
+function clearManagerSpeechState() {
+    committedText = "";
+    sessionText = "";
+    managerIsSpeaking = false;
+    clearSilenceTimer();
+    updateManagerInput("");
+}
+
+function updateManagerInput(text) {
+    if (!managerInput) return;
+    managerInput.value = text;
+    managerInput.scrollTop = managerInput.scrollHeight;
+}
+
+
+// =========================================================
+// INTERRUPTION / BARGE-IN
 // =========================================================
 
 function handleManagerInterruption() {
+    if (!employeeSpeechStarted) return;
 
-    if (!employeeSpeechStarted) {
+    console.log("BARGE-IN: manager interrupted Rohit.");
 
-        return;
+    markRohitInterrupted();
+    stopRohitSpeaking();
 
-    }
+    liveMeetingCard.classList.remove("rohit-speaking");
+    liveMeetingCard.classList.add("interruption-active");
 
+    updateTurnStatus("You interrupted Rohit", "His voice has stopped. Finish what you want to say.");
+    updateVoiceStatus("Listening");
+}
 
-    console.log(
-        "BARGE-IN: Manager started speaking."
-    );
+/** Rohit's turn is kept in the conversation, cut at the point where he was actually stopped. */
+function markRohitInterrupted() {
+    if (!currentRohit) return;
 
+    const { turn, el, full } = currentRohit;
+    if (spokenIndex >= full.length - 1) return; // he had effectively finished
 
-    interruptionDetected =
-        true;
+    const heard = full.slice(0, spokenIndex).trim();
+    const marked = heard ? `${heard}— [interrupted]` : "[interrupted]";
 
+    turn.text = marked;
+    if (el) el.textContent = marked;
+}
 
+function stopRohitSpeaking() {
     speechGenerationId++;
+    employeeSpeechStarted = false;
 
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 
-    if (
-        "speechSynthesis" in window
-    ) {
-
-        window.speechSynthesis.cancel();
-
-    }
-
-
-    employeeSpeechStarted =
-        false;
-
-
-    if (liveMeetingCard) {
-
-        liveMeetingCard.classList.remove(
-            "rohit-speaking"
-        );
-
-        liveMeetingCard.classList.add(
-            "interruption-active"
-        );
-
-    }
-
-
-    updateTurnStatus(
-        "You interrupted Rohit",
-        "His voice has stopped. Finish what you want to say."
-    );
-
-
-    updateVoiceStatus(
-        "Listening"
-    );
-
+    liveMeetingCard?.classList.remove("rohit-speaking");
 }
 
 
 // =========================================================
-// BUILD CURRENT MANAGER SPEECH
+// VOICES  (two different voices so the speakers are never confused)
 // =========================================================
 
-function buildCurrentManagerSpeech() {
+function setupVoices() {
+    if (!("speechSynthesis" in window)) return;
+    pickVoices();
+    window.speechSynthesis.onvoiceschanged = pickVoices;
+}
 
-    const finalText =
-        normalizeSpeechText(
-            recognitionFinalText
-        );
+function pickVoices() {
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices.length) return;
 
+    const english = voices.filter((v) => /^en/i.test(v.lang));
+    const male = english.find((v) => /(ravi|david|mark|james|daniel|male|rishi|guy|george|alex)/i.test(v.name));
+    const female = english.find((v) => /(zira|heera|samantha|female|susan|karen|aria|jenny|libby|veena)/i.test(v.name));
 
-    const interimText =
-        normalizeSpeechText(
-            recognitionInterimText
-        );
-
-
-    if (!finalText) {
-
-        return interimText;
-
-    }
-
-
-    if (!interimText) {
-
-        return finalText;
-
-    }
-
-
-    return combineFinalAndInterimSpeech();
-
+    rohitVoice = male || english[0] || null;
+    coachVoice = female || english.find((v) => v !== rohitVoice) || null;
 }
 
 
 // =========================================================
-// UPDATE MANAGER INPUT
-// =========================================================
-
-function updateManagerInput(text) {
-
-    if (!managerInput) {
-
-        return;
-
-    }
-
-
-    managerInput.value =
-        text;
-
-
-    managerInput.scrollTop =
-        managerInput.scrollHeight;
-
-}
-
-
-// =========================================================
-// SILENCE TIMER
-// =========================================================
-
-function resetManagerSilenceTimer() {
-
-    if (silenceTimer) {
-
-        clearTimeout(
-            silenceTimer
-        );
-
-    }
-
-
-    silenceTimer =
-        setTimeout(
-            () => {
-
-                if (
-                    managerIsSpeaking &&
-                    !employeeSpeechStarted &&
-                    !isGeneratingResponse &&
-                    meetingActive
-                ) {
-
-                    finishManagerTurn();
-
-                }
-
-            },
-            1200
-        );
-
-}
-
-
-// =========================================================
-// FINISH MANAGER TURN
-// =========================================================
-
-function finishManagerTurn() {
-
-    if (
-        isGeneratingResponse
-    ) {
-
-        return;
-
-    }
-
-
-    const message =
-        normalizeSpeechText(
-            buildCurrentManagerSpeech()
-        );
-
-
-    if (!message) {
-
-        return;
-
-    }
-
-
-    console.log(
-        "FINAL MANAGER TURN:",
-        message
-    );
-
-
-    /*
-     * IMPORTANT:
-     *
-     * Stop recognition BEFORE sending the message.
-     *
-     * This prevents late Chrome recognition events from
-     * modifying the message while the backend is processing.
-     */
-    stopRecognition();
-
-
-    clearManagerSpeechState();
-
-
-    sendManagerMessage(
-        message
-    );
-
-}
-
-
-// =========================================================
-// REHEARSAL SETUP
+// REHEARSAL CONTROLS
 // =========================================================
 
 function setupRehearsal() {
+    sendButton?.addEventListener("click", () => {
+        const message = managerInput ? managerInput.value.trim() : "";
+        if (!message) return;
 
+        if (employeeSpeechStarted) handleManagerInterruption();
 
-    // -----------------------------------------------------
-    // Typed send
-    // -----------------------------------------------------
+        stopRecognition();
+        clearManagerSpeechState();
+        sendManagerMessage(message);
+    });
 
-    if (sendButton) {
+    stopSpeakingButton?.addEventListener("click", () => {
+        markRohitInterrupted();
+        stopRohitSpeaking();
+        updateTurnStatus("Rohit stopped", "You can speak now.");
+        updateVoiceStatus("Listening");
+        if (meetingActive) startManagerListening(true);
+    });
 
-        sendButton.addEventListener(
-            "click",
-            () => {
-
-                const message =
-                    managerInput
-                        ? managerInput.value.trim()
-                        : "";
-
-
-                if (!message) {
-
-                    return;
-
-                }
-
-
-                if (
-                    employeeSpeechStarted
-                ) {
-
-                    handleManagerInterruption();
-
-                }
-
-
-                stopRecognition();
-
-                clearManagerSpeechState();
-
-
-                sendManagerMessage(
-                    message
-                );
-
-            }
-        );
-
-    }
-
-
-    // -----------------------------------------------------
-    // Stop Rohit
-    // -----------------------------------------------------
-
-    if (stopSpeakingButton) {
-
-        stopSpeakingButton.addEventListener(
-            "click",
-            () => {
-
-                stopRohitSpeaking();
-
-
-                updateTurnStatus(
-                    "Rohit stopped",
-                    "You can speak now."
-                );
-
-
-                updateVoiceStatus(
-                    "Listening"
-                );
-
-
-                if (meetingActive) {
-
-                    startManagerListening();
-
-                }
-
-            }
-        );
-
-    }
-
-
-    // -----------------------------------------------------
-    // Finish rehearsal
-    // -----------------------------------------------------
-
-    if (finishRehearsalButton) {
-
-        finishRehearsalButton.addEventListener(
-            "click",
-            () => {
-
-                endMeeting();
-
-            }
-        );
-
-    }
-
-
-    // -----------------------------------------------------
-    // Ctrl + Enter
-    // -----------------------------------------------------
-
-    if (managerInput) {
-
-        managerInput.addEventListener(
-            "keydown",
-            (event) => {
-
-                if (
-                    event.key === "Enter" &&
-                    event.ctrlKey
-                ) {
-
-                    event.preventDefault();
-
-
-                    if (sendButton) {
-
-                        sendButton.click();
-
-                    }
-
-                }
-
-            }
-        );
-
-    }
-
+    managerInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && event.ctrlKey) {
+            event.preventDefault();
+            sendButton?.click();
+        }
+    });
 }
 
 
 // =========================================================
-// CLEAR MANAGER SPEECH STATE
-// =========================================================
-
-function clearManagerSpeechState() {
-
-    currentManagerSpeech =
-        "";
-
-    interimManagerSpeech =
-        "";
-
-    recognitionFinalText =
-        "";
-
-    recognitionInterimText =
-        "";
-
-    managerIsSpeaking =
-        false;
-
-
-    if (silenceTimer) {
-
-        clearTimeout(
-            silenceTimer
-        );
-
-        silenceTimer =
-            null;
-
-    }
-
-
-    updateManagerInput("");
-
-}
-
-
-// =========================================================
-// CLEAN ROHIT RESPONSE
+// SEND MANAGER MESSAGE -> ROHIT
 // =========================================================
 
 function cleanRohitResponse(text) {
+    let response = normalizeSpeechText(text);
+    if (!response) return "";
 
-    let response =
-        normalizeSpeechText(text);
+    response = response.replace(/^```(?:text)?/i, "").replace(/```$/i, "").trim();
+    response = response.replace(/\[[^\]]*\]|\([^)]*\)/g, "").trim();
 
-
-    if (!response) {
-
-        return "";
-
-    }
-
-
-    /*
-     * Remove markdown fences.
-     */
-    response =
-        response
-            .replace(/^```(?:text)?/i, "")
-            .replace(/```$/i, "")
-            .trim();
-
-
-    /*
-     * Remove common LLM speaker prefixes.
-     */
-    const prefixes = [
-
-        "ROHIT:",
-        "Rohit:",
-        "EMPLOYEE:",
-        "Employee:",
-        "SIMULATED EMPLOYEE:",
-        "Simulated Employee:",
-        "ROHIT — SIMULATED EMPLOYEE:",
-        "Rohit — Simulated Employee:"
-
-    ];
-
-
-    let changed =
-        true;
-
-
+    const prefixes = ["rohit — simulated employee:", "simulated employee:", "employee:", "rohit:"];
+    let changed = true;
     while (changed) {
-
-        changed =
-            false;
-
-
+        changed = false;
         for (const prefix of prefixes) {
-
-            if (
-                response
-                    .toLowerCase()
-                    .startsWith(
-                        prefix.toLowerCase()
-                    )
-            ) {
-
-                response =
-                    response
-                        .slice(prefix.length)
-                        .trim();
-
-
-                changed =
-                    true;
-
+            if (response.toLowerCase().startsWith(prefix)) {
+                response = response.slice(prefix.length).trim();
+                changed = true;
             }
-
         }
-
     }
 
-
-    /*
-     * Remove surrounding quotation marks.
-     */
-    if (
-        response.length >= 2 &&
-        (
-            (
-                response.startsWith('"') &&
-                response.endsWith('"')
-            ) ||
-            (
-                response.startsWith("'") &&
-                response.endsWith("'")
-            )
-        )
-    ) {
-
-        response =
-            response.slice(
-                1,
-                -1
-            ).trim();
-
+    if (response.length >= 2 && /^["'].*["']$/.test(response)) {
+        response = response.slice(1, -1).trim();
     }
-
-
     return response;
-
 }
 
-
-// =========================================================
-// SEND MANAGER MESSAGE
-// =========================================================
-
 async function sendManagerMessage(message) {
+    message = normalizeSpeechText(message);
+    if (!message || isGeneratingResponse) return;
 
-    message =
-        normalizeSpeechText(
-            message
-        );
-
-
-    if (!message) {
-
-        return;
-
-    }
-
-
-    if (isGeneratingResponse) {
-
-        return;
-
-    }
-
+    const session = meetingSessionId;
 
     stopRohitSpeaking();
+    managerIsSpeaking = false;
+    isGeneratingResponse = true;
 
+    updateTurnStatus("Rohit is thinking", "Preparing his response...");
+    updateVoiceStatus("Thinking");
 
-    managerIsSpeaking =
-        false;
+    sendButton.disabled = true;
+    micButton.disabled = true;
 
+    // history BEFORE this message (the backend adds the latest message itself)
+    const previousConversation = conversation.map((t) => ({ speaker: t.speaker, text: t.text }));
 
-    updateTurnStatus(
-        "Rohit is thinking",
-        "Preparing his response..."
-    );
+    // The manager's turn is stored immediately, so it is never lost - even if the meeting
+    // is ended while Rohit is still "thinking".
+    conversation.push({ speaker: "manager", text: message });
+    addTranscriptMessage("manager", message);
 
-
-    updateVoiceStatus(
-        "Thinking"
-    );
-
-
-    isGeneratingResponse =
-        true;
-
-
-    if (sendButton) {
-
-        sendButton.disabled =
-            true;
-
-    }
-
-
-    if (micButton) {
-
-        micButton.disabled =
-            true;
-
-    }
-
-
-    /*
-     * Only send completed previous turns to backend.
-     */
-    const previousConversation =
-        conversation.map(
-            (turn) => ({
-
-                speaker:
-                    turn.speaker,
-
-                text:
-                    turn.text
-
-            })
-        );
-
-
-    /*
-     * Add manager message to visible transcript
-     * exactly once.
-     */
-    addTranscriptMessage(
-        "manager",
-        message
-    );
-
-
-    responseGenerationStartedAt =
-        performance.now();
-
+    sendStartedAt = performance.now();
 
     try {
-
-        const response =
-            await fetch(
-                "/api/rehearse",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-
-                        message:
-                            message,
-
-                        conversation:
-                            previousConversation
-
-                    })
-
-                }
-            );
-
-
-        const data =
-            await response.json();
-
-
-        if (!response.ok) {
-
-            throw new Error(
-                data.error ||
-                "Rehearsal request failed."
-            );
-
-        }
-
-
-        const rohitResponse =
-            cleanRohitResponse(
-                data.response
-            );
-
-
-        if (!rohitResponse) {
-
-            throw new Error(
-                "Rohit returned an empty response."
-            );
-
-        }
-
-
-        /*
-         * Save conversation.
-         */
-        conversation.push({
-
-            speaker:
-                "manager",
-
-            text:
-                message
-
+        const response = await fetch("/api/rehearse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, conversation: previousConversation })
         });
+        const data = await response.json();
 
+        // the rehearsal was ended / restarted while waiting -> discard this stale reply
+        if (session !== meetingSessionId) return;
 
-        conversation.push({
+        if (!response.ok) throw new Error(data.error || "Rehearsal request failed.");
 
-            speaker:
-                "rohit",
+        const rohitResponse = cleanRohitResponse(data.response);
+        if (!rohitResponse) throw new Error("Rohit returned an empty response.");
 
-            text:
-                rohitResponse
+        llmFinishedAt = performance.now();
 
-        });
+        const turn = { speaker: "rohit", text: rohitResponse };
+        conversation.push(turn);
+        const el = addTranscriptMessage("rohit", rohitResponse);
 
-
-        /*
-         * Display Rohit's response.
-         */
-        addTranscriptMessage(
-            "rohit",
-            rohitResponse
-        );
-
-
-        /*
-         * Speak response.
-         */
-        speakEmployeeResponse(
-            rohitResponse
-        );
-
+        speakEmployeeResponse(rohitResponse, turn, el);
 
     } catch (error) {
+        if (session !== meetingSessionId) return;
 
-        console.error(
-            "Rehearsal error:",
-            error
-        );
-
-
-        addTranscriptMessage(
-            "system",
-            `Error: ${error.message}`
-        );
-
-
-        updateTurnStatus(
-            "Something went wrong",
-            "Check that Flask and Ollama are running."
-        );
-
-
-        updateVoiceStatus(
-            "Error"
-        );
-
+        console.error("Rehearsal error:", error);
+        addTranscriptMessage("system", `Error: ${error.message}`);
+        updateTurnStatus("Something went wrong", "Check that Flask and Ollama are running.");
+        updateVoiceStatus("Error");
 
     } finally {
-
-        isGeneratingResponse =
-            false;
-
-
-        if (sendButton) {
-
-            sendButton.disabled =
-                false;
-
+        if (session === meetingSessionId) {
+            isGeneratingResponse = false;
+            sendButton.disabled = false;
+            micButton.disabled = false;
         }
-
-
-        if (micButton) {
-
-            micButton.disabled =
-                false;
-
-        }
-
     }
-
 }
 
 
@@ -2416,263 +810,81 @@ async function sendManagerMessage(message) {
 // ROHIT TEXT-TO-SPEECH
 // =========================================================
 
-function speakEmployeeResponse(text) {
-
-    if (
-        !("speechSynthesis" in window)
-    ) {
-
-        updateTurnStatus(
-            "Rohit responded",
-            "Browser speech synthesis is unavailable."
-        );
-
-
-        updateVoiceStatus(
-            "Voice unavailable"
-        );
-
-
-        if (meetingActive) {
-
-            startManagerListening();
-
-        }
-
-
+function speakEmployeeResponse(text, turn, el) {
+    if (!("speechSynthesis" in window)) {
+        updateTurnStatus("Rohit responded", "Browser speech synthesis is unavailable.");
+        updateVoiceStatus("Voice unavailable");
+        if (meetingActive) startManagerListening(true);
         return;
-
     }
-
 
     window.speechSynthesis.cancel();
 
-
-    const generationId =
-        ++speechGenerationId;
-
-
-    const utterance =
-        new SpeechSynthesisUtterance(
-            text
-        );
-
-
-    utterance.lang =
-        "en-IN";
-
-
-    utterance.rate =
-        0.96;
-
-
-    utterance.pitch =
-        0.92;
-
-
-    utterance.volume =
-        1.0;
-
-
-    utterance.onstart =
-        () => {
-
-            if (
-                generationId !==
-                speechGenerationId
-            ) {
-
-                return;
-
-            }
-
-
-            employeeSpeechStarted =
-                true;
-
-
-            const elapsed =
-                performance.now() -
-                (
-                    responseGenerationStartedAt ||
-                    performance.now()
-                );
-
-
-            if (timeToFirstSound) {
-
-                timeToFirstSound.textContent =
-                    `${Math.round(elapsed)} ms`;
-
-            }
-
-
-            updateTurnStatus(
-                "Rohit is speaking",
-                "You can interrupt him at any time."
-            );
-
-
-            updateVoiceStatus(
-                "Rohit speaking"
-            );
-
-
-            if (liveMeetingCard) {
-
-                liveMeetingCard.classList.add(
-                    "rohit-speaking"
-                );
-
-                liveMeetingCard.classList.remove(
-                    "interruption-active"
-                );
-
-            }
-
-
-            /*
-             * Keep microphone recognition running
-             * during Rohit's speech so interruption
-             * can be detected.
-             */
-            if (meetingActive) {
-
-                recognitionShouldRun =
-                    true;
-
-                startRecognition();
-
-            }
-
-        };
-
-
-    utterance.onend =
-        () => {
-
-            if (
-                generationId !==
-                speechGenerationId
-            ) {
-
-                return;
-
-            }
-
-
-            employeeSpeechStarted =
-                false;
-
-
-            if (liveMeetingCard) {
-
-                liveMeetingCard.classList.remove(
-                    "rohit-speaking"
-                );
-
-            }
-
-
-            if (meetingActive) {
-
-                startManagerListening();
-
-            } else {
-
-                updateTurnStatus(
-                    "Response complete",
-                    "Start the meeting to continue."
-                );
-
-
-                updateVoiceStatus(
-                    "Ready"
-                );
-
-            }
-
-        };
-
-
-    utterance.onerror =
-        (event) => {
-
-            if (
-                event.error === "canceled" ||
-                event.error === "interrupted"
-            ) {
-
-                return;
-
-            }
-
-
-            console.warn(
-                "Speech synthesis error:",
-                event.error
-            );
-
-
-            employeeSpeechStarted =
-                false;
-
-
-            if (liveMeetingCard) {
-
-                liveMeetingCard.classList.remove(
-                    "rohit-speaking"
-                );
-
-            }
-
-
-            if (meetingActive) {
-
-                startManagerListening();
-
-            }
-
-        };
-
-
-    window.speechSynthesis.speak(
-        utterance
-    );
-
-}
-
-
-// =========================================================
-// STOP ROHIT SPEAKING
-// =========================================================
-
-function stopRohitSpeaking() {
-
-    speechGenerationId++;
-
-
-    employeeSpeechStarted =
-        false;
-
-
-    if (
-        "speechSynthesis" in window
-    ) {
-
-        window.speechSynthesis.cancel();
-
+    const generationId = ++speechGenerationId;
+    currentRohit = { turn, el, full: text };
+    spokenIndex = 0;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.rate = 0.98;
+    utterance.pitch = 0.9;
+    if (rohitVoice) utterance.voice = rohitVoice;
+
+    utterance.onstart = () => {
+        if (generationId !== speechGenerationId) return;
+
+        employeeSpeechStarted = true;
+
+        const total = Math.round(performance.now() - (sendStartedAt || performance.now()));
+        const llm = Math.round((llmFinishedAt || performance.now()) - (sendStartedAt || performance.now()));
+        timeToFirstSound.textContent = `${total} ms (model ${llm} ms)`;
+
+        updateTurnStatus("Rohit is speaking (simulated)", "You can interrupt him at any time.");
+        updateVoiceStatus("Rohit speaking");
+
+        liveMeetingCard.classList.add("rohit-speaking");
+        liveMeetingCard.classList.remove("interruption-active");
+    };
+
+    utterance.onboundary = (event) => {
+        if (generationId !== speechGenerationId) return;
+        if (typeof event.charIndex === "number") spokenIndex = event.charIndex;
+    };
+
+    utterance.onend = () => {
+        if (generationId !== speechGenerationId) return;
+
+        employeeSpeechStarted = false;
+        currentRohit = null;
+        liveMeetingCard.classList.remove("rohit-speaking");
+
+        if (meetingActive) {
+            // discard anything the mic heard while Rohit was talking (his own voice / echo)
+            restartRecognitionFresh();
+            updateTurnStatus("Your turn", "Speak naturally. Rohit is listening.");
+            updateVoiceStatus("Listening");
+        } else {
+            updateTurnStatus("Response complete", "Start the meeting to continue.");
+            updateVoiceStatus("Ready");
+        }
+    };
+
+    utterance.onerror = (event) => {
+        if (event.error === "canceled" || event.error === "interrupted") return;
+
+        console.warn("Speech synthesis error:", event.error);
+        employeeSpeechStarted = false;
+        liveMeetingCard.classList.remove("rohit-speaking");
+        if (meetingActive) startManagerListening(true);
+    };
+
+    // Start listening BEFORE Rohit speaks, so the first words of an interruption are not lost.
+    if (meetingActive) {
+        recognitionShouldRun = true;
+        startRecognition();
     }
 
-
-    if (liveMeetingCard) {
-
-        liveMeetingCard.classList.remove(
-            "rohit-speaking"
-        );
-
-    }
-
+    window.speechSynthesis.speak(utterance);
 }
 
 
@@ -2681,573 +893,225 @@ function stopRohitSpeaking() {
 // =========================================================
 
 function setupMeetingControls() {
-
-    if (startMeetingButton) {
-
-        startMeetingButton.addEventListener(
-            "click",
-            startMeeting
-        );
-
-    }
-
-
-    if (endMeetingButton) {
-
-        endMeetingButton.addEventListener(
-            "click",
-            endMeeting
-        );
-
-    }
-
+    startMeetingButton?.addEventListener("click", startMeeting);
+    endMeetingButton?.addEventListener("click", endMeeting);
 }
-
-
-// =========================================================
-// START MEETING
-// =========================================================
 
 function startMeeting() {
+    if (meetingActive) return;
 
-    if (meetingActive) {
-
-        return;
-
-    }
-
-
-    console.log(
-        "Starting rehearsal meeting."
-    );
-
-
-    meetingActive =
-        true;
-
-
-    conversation =
-        [];
-
+    // new rehearsal = completely fresh state
+    showMode("rehearse");
+    meetingSessionId++;
+    debriefRequestId++;
+    meetingActive = true;
+    isGeneratingResponse = false;
+    conversation = [];
+    currentRohit = null;
 
     stopRohitSpeaking();
-
     stopRecognition();
-
     clearManagerSpeechState();
 
+    transcript.innerHTML = "";
+    debriefTranscript.textContent = "Rehearsal in progress.";
+    debriefResponse.textContent = "";
+    debriefResponse.style.display = "none";
+    timeToFirstSound.textContent = "—";
+    managerInput.value = "";
 
-    interruptionDetected =
-        false;
+    startMeetingButton.disabled = true;
+    endMeetingButton.disabled = false;
+    sendButton.disabled = false;
+    micButton.disabled = false;
 
+    liveMeetingCard.classList.add("meeting-active");
+    liveMeetingCard.classList.remove("rohit-speaking", "interruption-active");
 
-    meetingStartedAt =
-        performance.now();
+    updateTurnStatus("Meeting started", "You have the floor. Start the conversation.");
+    updateVoiceStatus("Listening");
 
-
-    if (transcript) {
-
-        transcript.innerHTML =
-            "";
-
-    }
-
-
-    if (debriefTranscript) {
-
-        debriefTranscript.textContent =
-            "Rehearsal in progress.";
-
-    }
-
-
-    if (debriefResponse) {
-
-        debriefResponse.textContent =
-            "";
-
-    }
-
-
-    if (timeToFirstSound) {
-
-        timeToFirstSound.textContent =
-            "—";
-
-    }
-
-
-    if (managerInput) {
-
-        managerInput.value =
-            "";
-
-    }
-
-
-    if (startMeetingButton) {
-
-        startMeetingButton.disabled =
-            true;
-
-    }
-
-
-    if (endMeetingButton) {
-
-        endMeetingButton.disabled =
-            false;
-
-    }
-
-
-    if (liveMeetingCard) {
-
-        liveMeetingCard.classList.add(
-            "meeting-active"
-        );
-
-    }
-
-
-    updateTurnStatus(
-        "Meeting started",
-        "You have the floor. Start the conversation."
-    );
-
-
-    updateVoiceStatus(
-        "Listening"
-    );
-
-
-    /*
-     * Enable recognition.
-     */
-    recognitionShouldRun =
-        true;
-
-
-    resetRecognitionBuffer();
-
-
-    /*
-     * The announcement speaks first.
-     * Recognition starts after the announcement.
-     */
     speakMeetingAnnouncement();
-
 }
 
-
-// =========================================================
-// MEETING ANNOUNCEMENT
-// =========================================================
-
+/** The coach (a different voice from Rohit) announces the start. */
 function speakMeetingAnnouncement() {
-
-    if (
-        !("speechSynthesis" in window)
-    ) {
-
-        startManagerListening();
-
+    if (!("speechSynthesis" in window)) {
+        startManagerListening(true);
         return;
-
     }
 
+    const utterance = new SpeechSynthesisUtterance(
+        "Coach here. The rehearsal has started. Rohit is simulated. You can begin when you're ready."
+    );
+    utterance.lang = "en-IN";
+    utterance.rate = 1.0;
+    utterance.pitch = 1.15;
+    if (coachVoice) utterance.voice = coachVoice;
 
-    const utterance =
-        new SpeechSynthesisUtterance(
-            "The meeting has started. You can begin when you're ready."
-        );
-
-
-    utterance.lang =
-        "en-IN";
-
-
-    utterance.rate =
-        0.98;
-
-
-    utterance.onend =
-        () => {
-
-            if (meetingActive) {
-
-                startManagerListening();
-
-            }
-
-        };
-
+    const done = () => { if (meetingActive) startManagerListening(true); };
+    utterance.onend = done;
+    utterance.onerror = done;
 
     window.speechSynthesis.cancel();
-
-
-    window.speechSynthesis.speak(
-        utterance
-    );
-
+    window.speechSynthesis.speak(utterance);
 }
 
+function speakCoach(text) {
+    if (!("speechSynthesis" in window)) return;
 
-// =========================================================
-// START MANAGER LISTENING
-// =========================================================
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.pitch = 1.15;
+    if (coachVoice) utterance.voice = coachVoice;
 
-function startManagerListening() {
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+}
 
-    if (!meetingActive) {
+/** fresh = true: start a clean recognition session with an empty buffer. */
+function startManagerListening(fresh = false) {
+    if (!meetingActive) return;
 
-        return;
+    employeeSpeechStarted = false;
 
-    }
+    updateTurnStatus("Your turn", "Speak naturally. Rohit is listening.");
+    updateVoiceStatus("Listening");
 
+    if (fresh && !recognitionRunning) clearManagerSpeechState();
 
-    employeeSpeechStarted =
-        false;
-
-
-    recognitionShouldRun =
-        true;
-
-
-    updateTurnStatus(
-        "Your turn",
-        "Speak naturally. Rohit is listening."
-    );
-
-
-    updateVoiceStatus(
-        "Listening"
-    );
-
-
+    recognitionShouldRun = true;
     startRecognition();
-
 }
-
-
-// =========================================================
-// END MEETING
-// =========================================================
 
 function endMeeting() {
-
     if (!meetingActive) {
-
-        showMode(
-            "debrief"
-        );
-
+        showMode("debrief");
         return;
-
     }
 
+    meetingSessionId++;          // any Rohit reply still in flight is now stale and ignored
+    meetingActive = false;
+    isGeneratingResponse = false;
+    currentRohit = null;
 
-    console.log(
-        "Ending rehearsal meeting."
-    );
-
-
-    meetingActive =
-        false;
-
-
+    markRohitInterrupted();
     stopRohitSpeaking();
-
     stopRecognition();
-
-
-    if (silenceTimer) {
-
-        clearTimeout(
-            silenceTimer
-        );
-
-        silenceTimer =
-            null;
-
-    }
-
-
     clearManagerSpeechState();
 
+    startMeetingButton.disabled = false;
+    endMeetingButton.disabled = true;
+    sendButton.disabled = false;
+    micButton.disabled = false;
 
-    if (startMeetingButton) {
+    liveMeetingCard.classList.remove("meeting-active", "rohit-speaking", "interruption-active");
 
-        startMeetingButton.disabled =
-            false;
+    updateTurnStatus("Meeting ended", "Generating your debrief...");
+    speakCoach("Rehearsal over. Rohit has left. Here is your debrief.");
+    updateVoiceStatus("Ready");
 
-    }
+    // clear the previous debrief immediately so an old result can never be shown for a new rehearsal
+    debriefResponse.textContent = "";
+    debriefResponse.style.display = "none";
 
-
-    if (endMeetingButton) {
-
-        endMeetingButton.disabled =
-            true;
-
-    }
-
-
-    if (liveMeetingCard) {
-
-        liveMeetingCard.classList.remove(
-            "meeting-active",
-            "rohit-speaking",
-            "interruption-active"
-        );
-
-    }
-
-
-    updateTurnStatus(
-        "Meeting ended",
-        "Review the rehearsal and generate the debrief."
-    );
-
-
-    updateVoiceStatus(
-        "Ready"
-    );
-
-
-    updateDebriefTranscript();
-
-
-    showMode(
-        "debrief"
-    );
-
+    showMode("debrief");
+    generateDebrief();
 }
 
 
 // =========================================================
-// DEBRIEF SETUP
+// DEBRIEF
 // =========================================================
 
 function setupDebrief() {
-
-    if (!debriefButton) {
-
-        return;
-
-    }
-
-
-    debriefButton.addEventListener(
-        "click",
-        generateDebrief
-    );
-
+    debriefButton?.addEventListener("click", generateDebrief);
 }
-
-
-// =========================================================
-// GENERATE DEBRIEF
-// =========================================================
 
 async function generateDebrief() {
+    const snapshot = conversation.map((t) => ({ speaker: t.speaker, text: t.text }));
 
-    if (!conversation.length) {
-
-        showDebriefMessage(
-            "No rehearsal conversation was recorded. Complete a rehearsal before generating a debrief."
-        );
-
+    if (!snapshot.length) {
+        showDebriefMessage("No rehearsal conversation was recorded. Complete a rehearsal before generating a debrief.");
         return;
-
     }
 
+    const managerTurns = snapshot.filter((t) => t.speaker === "manager" && String(t.text || "").trim());
 
-    const hasManagerTurn =
-        conversation.some(
-            (turn) =>
-                turn.speaker === "manager" &&
-                String(
-                    turn.text || ""
-                ).trim()
-        );
-
-
-    if (!hasManagerTurn) {
-
-        showDebriefMessage(
-            "No manager speech was recorded. Complete a rehearsal before generating a debrief."
-        );
-
+    if (!managerTurns.length) {
+        showDebriefMessage("No manager speech was recorded. Complete a rehearsal before generating a debrief.");
         return;
-
     }
 
+    const requestId = ++debriefRequestId;
 
-    debriefButton.disabled =
-        true;
-
-
-    showDebriefMessage(
-        "Generating debrief..."
-    );
-
-
+    debriefButton.disabled = true;
     updateDebriefTranscript();
-
+    showDebriefMessage(`Generating debrief for this rehearsal (${managerTurns.length} manager turn(s))...`);
 
     try {
+        const response = await fetch("/api/debrief", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conversation: snapshot })
+        });
+        const data = await response.json();
 
-        const response =
-            await fetch(
-                "/api/debrief",
-                {
-                    method: "POST",
+        if (requestId !== debriefRequestId) return; // a newer rehearsal started meanwhile
 
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
+        if (!response.ok) throw new Error(data.error || "Debrief request failed.");
 
-                    body: JSON.stringify({
-
-                        conversation:
-                            conversation
-
-                    })
-
-                }
-            );
-
-
-        const data =
-            await response.json();
-
-
-        if (!response.ok) {
-
-            throw new Error(
-                data.error ||
-                "Debrief request failed."
-            );
-
-        }
-
-
-        showDebriefMessage(
-            data.response ||
-            "No debrief response returned."
-        );
-
-
+        showDebriefMessage(data.response || "No debrief response returned.");
     } catch (error) {
-
-        console.error(
-            "Debrief error:",
-            error
-        );
-
-
-        showDebriefMessage(
-            `Error: ${error.message}`
-        );
-
-
+        if (requestId !== debriefRequestId) return;
+        console.error("Debrief error:", error);
+        showDebriefMessage(`Error: ${error.message}`);
     } finally {
-
-        debriefButton.disabled =
-            false;
-
+        if (requestId === debriefRequestId) debriefButton.disabled = false;
     }
-
 }
 
-
-// =========================================================
-// DEBRIEF RESULT DISPLAY
-// =========================================================
+const DEBRIEF_HEADINGS = /^(READINESS CALL|GOOD MOMENT|MOMENT TO IMPROVE|USABLE OPENING LINE|LIKELY OBJECTION \d|COACHING SUMMARY)\s*:?$/i;
 
 function showDebriefMessage(message) {
+    debriefResponse.style.display = "block";
+    debriefResponse.innerHTML = "";
 
-    if (!debriefResponse) {
+    let afterReadiness = false;
 
-        return;
+    String(message).split("\n").forEach((raw) => {
+        const line = raw.trim().replace(/^\*+|\*+$/g, "").trim();
+        if (!line) return;
 
-    }
+        const el = document.createElement("div");
 
-
-    debriefResponse.style.display =
-        "block";
-
-
-    debriefResponse.textContent =
-        message;
-
+        if (DEBRIEF_HEADINGS.test(line)) {
+            el.className = "debrief-heading";
+            el.textContent = line.replace(/:$/, "");
+            afterReadiness = /^READINESS CALL/i.test(line);
+        } else {
+            el.className = "debrief-line" + (afterReadiness ? " readiness" : "");
+            el.textContent = raw.trim();
+            afterReadiness = false;
+        }
+        debriefResponse.appendChild(el);
+    });
 }
 
-
-// =========================================================
-// DEBRIEF TRANSCRIPT
-// =========================================================
-
 function updateDebriefTranscript() {
+    const lines = conversation
+        .filter((t) => t && t.text && String(t.text).trim())
+        .map((t) => {
+            const speaker =
+                t.speaker === "manager" ? "YOU — MANAGER"
+                : t.speaker === "rohit" ? "ROHIT — SIMULATED EMPLOYEE"
+                : "SYSTEM";
+            return `${speaker}: ${t.text}`;
+        });
 
-    if (!debriefTranscript) {
-
-        return;
-
-    }
-
-
-    if (!conversation.length) {
-
-        debriefTranscript.textContent =
-            "No rehearsal conversation recorded.";
-
-        return;
-
-    }
-
-
-    const lines =
-        conversation
-            .filter(
-                (turn) =>
-                    turn &&
-                    turn.text &&
-                    String(
-                        turn.text
-                    ).trim()
-            )
-            .map(
-                (turn) => {
-
-                    const speaker =
-                        turn.speaker === "manager"
-                            ? "YOU — MANAGER"
-                            : turn.speaker === "rohit"
-                                ? "ROHIT — SIMULATED EMPLOYEE"
-                                : "SYSTEM";
-
-
-                    return `${speaker}: ${turn.text}`;
-
-                }
-            );
-
-
-    if (!lines.length) {
-
-        debriefTranscript.textContent =
-            "No rehearsal conversation recorded.";
-
-        return;
-
-    }
-
-
-    debriefTranscript.textContent =
-        lines.join("\n\n");
-
+    debriefTranscript.textContent = lines.length
+        ? lines.join("\n\n")
+        : "No rehearsal conversation recorded.";
 }
 
 
@@ -3255,379 +1119,93 @@ function updateDebriefTranscript() {
 // TRANSCRIPT
 // =========================================================
 
-function addTranscriptMessage(
-    speaker,
-    text
-) {
+/** Adds a line and returns the element holding the text (so an interrupted line can be edited). */
+function addTranscriptMessage(speaker, text) {
+    text = normalizeSpeechText(text);
+    if (!transcript || !text) return null;
 
-    if (!transcript) {
+    transcript.querySelector(".empty-transcript")?.remove();
 
-        return;
+    const entry = document.createElement("div");
+    entry.className = `transcript-entry ${speaker}`;
 
-    }
+    const message = document.createElement("div");
+    message.className = `transcript-message ${speaker}`;
 
+    const label = document.createElement("div");
+    label.className = "transcript-speaker";
+    label.textContent =
+        speaker === "manager" ? "You — Manager"
+        : speaker === "rohit" ? "Rohit — Simulated Employee"
+        : "System";
 
-    text =
-        normalizeSpeechText(text);
+    const body = document.createElement("div");
+    body.className = "transcript-text";
+    body.textContent = text;
 
+    message.appendChild(label);
+    message.appendChild(body);
+    entry.appendChild(message);
+    transcript.appendChild(entry);
+    transcript.scrollTop = transcript.scrollHeight;
 
-    if (!text) {
-
-        return;
-
-    }
-
-
-    /*
-     * Prevent exact duplicate messages.
-     */
-    const existingMessages =
-        transcript.querySelectorAll(
-            ".transcript-message"
-        );
-
-
-    for (
-        let i = existingMessages.length - 1;
-        i >= 0;
-        i--
-    ) {
-
-        const existing =
-            existingMessages[i];
-
-
-        const existingSpeaker =
-            existing.classList.contains(
-                speaker
-            );
-
-
-        const existingBody =
-            existing.querySelector(
-                ".transcript-text"
-            );
-
-
-        if (
-            existingSpeaker &&
-            existingBody &&
-            normalizeSpeechText(
-                existingBody.textContent
-            ) === text
-        ) {
-
-            return;
-
-        }
-
-    }
-
-
-    const emptyTranscript =
-        transcript.querySelector(
-            ".empty-transcript"
-        );
-
-
-    if (emptyTranscript) {
-
-        emptyTranscript.remove();
-
-    }
-
-
-    const message =
-        document.createElement(
-            "div"
-        );
-
-
-    message.className =
-        `transcript-message ${speaker}`;
-
-
-    const label =
-        document.createElement(
-            "div"
-        );
-
-
-    label.className =
-        "transcript-speaker";
-
-
-    if (speaker === "manager") {
-
-        label.textContent =
-            "You — Manager";
-
-    } else if (
-        speaker === "rohit"
-    ) {
-
-        label.textContent =
-            "Rohit — Simulated Employee";
-
-    } else {
-
-        label.textContent =
-            "System";
-
-    }
-
-
-    const body =
-        document.createElement(
-            "div"
-        );
-
-
-    body.className =
-        "transcript-text";
-
-
-    body.textContent =
-        text;
-
-
-    message.appendChild(
-        label
-    );
-
-
-    message.appendChild(
-        body
-    );
-
-
-    transcript.appendChild(
-        message
-    );
-
-
-    transcript.scrollTop =
-        transcript.scrollHeight;
-
+    return body;
 }
 
 
 // =========================================================
-// TURN STATUS
+// STATUS UI
 // =========================================================
 
-function updateTurnStatus(
-    title,
-    description
-) {
-
-    if (turnStatus) {
-
-        turnStatus.textContent =
-            title;
-
-    }
-
-
-    if (turnDescription) {
-
-        turnDescription.textContent =
-            description;
-
-    }
-
+function updateTurnStatus(title, description) {
+    if (turnStatus) turnStatus.textContent = title;
+    if (turnDescription) turnDescription.textContent = description;
 }
-
-
-// =========================================================
-// VOICE STATUS
-// =========================================================
 
 function updateVoiceStatus(status) {
+    if (voiceStatus) voiceStatus.textContent = status;
+    if (!voiceStatusDot) return;
 
-    if (voiceStatus) {
+    voiceStatusDot.classList.remove("status-listening", "status-speaking", "status-thinking", "status-error");
 
-        voiceStatus.textContent =
-            status;
-
+    if (status === "Listening") voiceStatusDot.classList.add("status-listening");
+    if (status === "Rohit speaking") voiceStatusDot.classList.add("status-speaking");
+    if (status === "Thinking") voiceStatusDot.classList.add("status-thinking");
+    if (["Error", "Voice unavailable", "Microphone permission required"].includes(status)) {
+        voiceStatusDot.classList.add("status-error");
     }
-
-
-    if (!voiceStatusDot) {
-
-        return;
-
-    }
-
-
-    voiceStatusDot.classList.remove(
-        "status-listening",
-        "status-speaking",
-        "status-thinking",
-        "status-error"
-    );
-
-
-    if (
-        status === "Listening"
-    ) {
-
-        voiceStatusDot.classList.add(
-            "status-listening"
-        );
-
-    }
-
-
-    if (
-        status === "Rohit speaking"
-    ) {
-
-        voiceStatusDot.classList.add(
-            "status-speaking"
-        );
-
-    }
-
-
-    if (
-        status === "Thinking"
-    ) {
-
-        voiceStatusDot.classList.add(
-            "status-thinking"
-        );
-
-    }
-
-
-    if (
-        status === "Error" ||
-        status === "Voice unavailable" ||
-        status === "Microphone permission required"
-    ) {
-
-        voiceStatusDot.classList.add(
-            "status-error"
-        );
-
-    }
-
 }
-
-
-// =========================================================
-// RECOGNITION UI
-// =========================================================
 
 function updateRecognitionUI() {
-
-    if (!micButton) {
-
-        return;
-
-    }
-
+    if (!micButton) return;
 
     if (!recognitionSupported) {
-
-        micButton.disabled =
-            true;
-
-        micButton.textContent =
-            "Mic unavailable";
-
+        micButton.disabled = true;
+        micButton.textContent = "Mic unavailable";
         return;
-
     }
 
-
-    /*
-     * Do not permanently disable the microphone
-     * just because the backend is generating a response.
-     */
-    if (recognitionRunning) {
-
-        micButton.classList.add(
-            "listening"
-        );
-
-        micButton.textContent =
-            "🎙 Listening";
-
-    } else {
-
-        micButton.classList.remove(
-            "listening"
-        );
-
-        micButton.textContent =
-            "🎙 Speak";
-
-    }
-
+    micButton.classList.toggle("listening", recognitionRunning);
+    micButton.textContent = recognitionRunning ? "🎙 Listening" : "🎙 Speak";
 }
 
 
 // =========================================================
-// KEYBOARD SHORTCUT
+// KEYBOARD + CLEANUP
 // =========================================================
 
-document.addEventListener(
-    "keydown",
-    (event) => {
-
-        if (
-            event.key === "Escape" &&
-            employeeSpeechStarted
-        ) {
-
-            stopRohitSpeaking();
-
-
-            updateTurnStatus(
-                "Rohit stopped",
-                "You can speak now."
-            );
-
-
-            if (meetingActive) {
-
-                startManagerListening();
-
-            } else {
-
-                updateVoiceStatus(
-                    "Ready"
-                );
-
-            }
-
-        }
-
-    }
-);
-
-
-// =========================================================
-// CLEANUP
-// =========================================================
-
-window.addEventListener(
-    "beforeunload",
-    () => {
-
-        meetingActive =
-            false;
-
-
-        recognitionShouldRun =
-            false;
-
-
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && employeeSpeechStarted) {
+        markRohitInterrupted();
         stopRohitSpeaking();
-
-        stopRecognition();
-
+        updateTurnStatus("Rohit stopped", "You can speak now.");
+        if (meetingActive) startManagerListening(true);
     }
-);
+});
+
+window.addEventListener("beforeunload", () => {
+    meetingActive = false;
+    recognitionShouldRun = false;
+    stopRohitSpeaking();
+    stopRecognition();
+});

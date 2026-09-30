@@ -1,0 +1,25 @@
+{
+  "name": "Situation – Behaviour – Impact",
+  "steps": [
+    {
+      "letter": "S",
+      "title": "Situation",
+      "description": "When and where, specifically (for example: the last 90 days, Monday and Tuesday starts)."
+    },
+    {
+      "letter": "B",
+      "title": "Behaviour",
+      "description": "The observable action, not a judgement of the person (for example: 14 arrivals after 09:30)."
+    },
+    {
+      "letter": "I",
+      "title": "Impact",
+      "description": "The concrete effect on the team, the client or the work."
+    }
+  ],
+  "then": [
+    "Ask an open question and listen to the answer",
+    "Agree a specific change",
+    "Agree how and when it will be checked"
+  ]
+}

@@ -1,82 +1,60 @@
-import difflib
 import json
 import re
 from pathlib import Path
 
 from services.llm_service import generate_response
 
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
 EMPLOYEE_FILE = BASE_DIR / "employee_record.json"
 PROMPT_FILE = BASE_DIR / "prompts" / "debrief_prompt.txt"
 
-READINESS_LABELS = {
-    "READY": "You are ready for this conversation.",
-    "REHEARSE_AGAIN": "Rehearse once more before the real conversation.",
-    "TALK_TO_HR": "Do not have this conversation yet. Speak to your HR partner first.",
-}
+MAX_ATTEMPTS = 3
 
-MIN_MANAGER_TURNS_FOR_READY = 4
-
-
-# ---------- data ----------
 
 def load_employee_record():
-    with open(EMPLOYEE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(EMPLOYEE_FILE, "r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 def load_prompt():
-    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
-        return f.read()
+    with open(PROMPT_FILE, "r", encoding="utf-8") as file:
+        return file.read()
 
 
 def build_debrief_employee_context(employee):
-    perf, att = employee["performance"], employee["attendance"]
+    """
+    Confidential 360 feedback, HR notes and compensation are intentionally excluded.
+    """
     return {
         "employee": {
             "name": employee["name"],
             "role": employee["role"],
             "tenure_months": employee["tenure_months"],
         },
-        "performance": {k: perf[k] for k in (
-            "current_cycle_rating", "previous_cycle_rating", "trend", "last_reviewed")},
+        "performance": {
+            "current_cycle_rating": employee["performance"]["current_cycle_rating"],
+            "previous_cycle_rating": employee["performance"]["previous_cycle_rating"],
+            "trend": employee["performance"]["trend"],
+            "last_reviewed": employee["performance"]["last_reviewed"],
+        },
         "goals": employee["goals"],
-        "attendance": {k: att[k] for k in (
-            "scheduled_start", "late_arrivals_last_90_days", "average_lateness_minutes",
-            "pattern_note", "prior_conversation_logged")},
+        "attendance": {
+            "scheduled_start": employee["attendance"]["scheduled_start"],
+            "late_arrivals_last_90_days": employee["attendance"]["late_arrivals_last_90_days"],
+            "average_lateness_minutes": employee["attendance"]["average_lateness_minutes"],
+            "pattern_note": employee["attendance"]["pattern_note"],
+            "prior_conversation_logged": employee["attendance"]["prior_conversation_logged"],
+        },
     }
 
 
-def build_transcript_text(conversation):
-    lines = []
-    for turn in conversation:
-        text = str(turn.get("text", "")).strip()
-        if not text:
-            continue
-        speaker = turn.get("speaker")
-        label = "MANAGER" if speaker == "manager" else "ROHIT (simulated)" if speaker == "rohit" else None
-        if label:
-            lines.append(f"{label}: {text}")
-    return "\n".join(lines)
+# =========================================================
+# TRANSCRIPT HELPERS
+# =========================================================
 
-
-def build_debrief_prompt(conversation):
-    context = json.dumps(
-        build_debrief_employee_context(load_employee_record()), indent=2, ensure_ascii=False)
-    prompt = load_prompt()
-    prompt = prompt.replace("{{EMPLOYEE_CONTEXT}}", context)
-    prompt = prompt.replace("{{TRANSCRIPT}}", build_transcript_text(conversation))
-    return prompt
-
-
-# ---------- validation ----------
-
-def _norm(text):
-    text = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def manager_turns(conversation):
+def get_manager_lines(conversation):
     return [
         str(t.get("text", "")).strip()
         for t in conversation
@@ -84,123 +62,132 @@ def manager_turns(conversation):
     ]
 
 
-def quote_is_valid(quote, turns):
+def build_transcript_text(conversation):
+    if not conversation:
+        return "No rehearsal conversation was recorded."
+
+    lines = []
+    for turn in conversation:
+        speaker = turn.get("speaker", "unknown")
+        text = str(turn.get("text", "")).strip()
+        if not text:
+            continue
+        if speaker == "manager":
+            label = "MANAGER"
+        elif speaker == "rohit":
+            label = "ROHIT — SIMULATED EMPLOYEE"
+        else:
+            label = str(speaker).upper()
+        lines.append(f"{label}: {text}")
+
+    return "\n".join(lines)
+
+
+def build_manager_lines_text(manager_lines):
+    return "\n".join(f'{i}. "{line}"' for i, line in enumerate(manager_lines, 1))
+
+
+def build_debrief_prompt(conversation):
+    employee = load_employee_record()
+    template = load_prompt()
+
+    safe_context = build_debrief_employee_context(employee)
+    manager_lines = get_manager_lines(conversation)
+
+    prompt = template
+    prompt = prompt.replace("{{EMPLOYEE_CONTEXT}}", json.dumps(safe_context, indent=2, ensure_ascii=False))
+    prompt = prompt.replace("{{MANAGER_LINES}}", build_manager_lines_text(manager_lines))
+    # transcript LAST: it is user-generated text
+    prompt = prompt.replace("{{TRANSCRIPT}}", build_transcript_text(conversation))
+
+    return prompt
+
+
+# =========================================================
+# QUOTE VALIDATION  (the model must not invent quotations)
+# =========================================================
+
+def _norm(text):
+    text = text.lower().replace("’", "'").replace("‘", "'")
+    text = re.sub(r"[^a-z0-9\s]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+QUOTE_PATTERN = re.compile(
+    r'(?P<head>(?:GOOD MOMENT|MOMENT TO IMPROVE)\s*\n+\s*)["“](?P<quote>.+?)["”]',
+    re.DOTALL,
+)
+
+
+def _quote_is_valid(quote, manager_lines):
     q = _norm(quote)
-    return len(q) >= 3 and any(q in _norm(t) for t in turns)
+    return bool(q) and any(q in _norm(line) for line in manager_lines)
 
 
-def closest_turn(quote, turns):
-    normed = [_norm(t) for t in turns]
-    match = difflib.get_close_matches(_norm(quote), normed, n=1, cutoff=0.4)
-    return turns[normed.index(match[0])] if match else None
+def _best_matching_line(quote, manager_lines):
+    q_words = set(_norm(quote).split())
+    best, best_score = manager_lines[0], -1
+    for line in manager_lines:
+        score = len(q_words & set(_norm(line).split()))
+        if score > best_score:
+            best, best_score = line, score
+    return best
 
 
-def parse_json(raw):
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError):
-        pass
-    start, end = raw.find("{"), raw.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(raw[start:end + 1])
-        except ValueError:
-            pass
-    return {}
+def find_invalid_quotes(text, manager_lines):
+    return [
+        m.group("quote")
+        for m in QUOTE_PATTERN.finditer(text)
+        if not _quote_is_valid(m.group("quote"), manager_lines)
+    ]
 
 
-def find_problems(data, turns):
-    if not isinstance(data, dict) or not data:
-        return ["The answer was not valid JSON with the required keys."]
+def repair_invalid_quotes(text, manager_lines):
+    """Last resort: swap a fabricated quote for the closest REAL manager line."""
 
-    problems, quotes = [], []
-    for key in ("worked", "did_not_work"):
-        block = data.get(key) if isinstance(data.get(key), dict) else {}
-        quote = block.get("quote", "")
-        quotes.append(_norm(quote))
-        if not quote_is_valid(quote, turns):
-            problems.append(f'"{key}.quote" is not copied word for word from a MANAGER line: {quote!r}')
+    def fix(match):
+        quote = match.group("quote")
+        if _quote_is_valid(quote, manager_lines):
+            return match.group(0)
+        return f'{match.group("head")}"{_best_matching_line(quote, manager_lines)}"'
 
-    if len(turns) > 1 and quotes[0] == quotes[1]:
-        problems.append("worked and did_not_work must quote two different manager lines.")
-    if not str(data.get("opening_line", "")).strip():
-        problems.append('"opening_line" is missing.')
-    return problems
+    return QUOTE_PATTERN.sub(fix, text)
 
 
-# ---------- result ----------
-
-def finalize_debrief(data, turns, warnings):
-    if not isinstance(data, dict) or not data:
-        raise RuntimeError("The model did not return a usable debrief. Please try again.")
-
-    def moment(key):
-        block = data.get(key) if isinstance(data.get(key), dict) else {}
-        quote = str(block.get("quote", "")).strip()
-        if not quote_is_valid(quote, turns):
-            repaired = closest_turn(quote, turns)
-            if repaired:
-                warnings.append("A quote was replaced with the closest line the manager actually said.")
-            quote = repaired or ""
-        return {"quote": quote, "why": str(block.get("why", "")).strip()}
-
-    objections = []
-    for item in (data.get("objections") or [])[:2]:
-        if isinstance(item, dict) and str(item.get("objection", "")).strip():
-            objections.append({
-                "objection": str(item["objection"]).strip(),
-                "response": str(item.get("response", "")).strip(),
-            })
-    while len(objections) < 2:
-        objections.append({
-            "objection": "No clear objection was raised in this rehearsal.",
-            "response": "Ask an open question, then listen before you respond.",
-        })
-
-    readiness = re.sub(r"[^A-Z]+", "_", str(data.get("readiness", "")).upper()).strip("_")
-    if readiness not in READINESS_LABELS:
-        readiness = "REHEARSE_AGAIN"
-
-    reason = str(data.get("readiness_reason", "")).strip()
-
-    # Small models are generous: a very short rehearsal cannot be "READY".
-    if readiness == "READY" and len(turns) < MIN_MANAGER_TURNS_FOR_READY:
-        readiness = "REHEARSE_AGAIN"
-        reason = "This rehearsal was too short to show the full conversation (opening, listening, agreement, follow-up)."
-
-    return {
-        "readiness": readiness,
-        "readiness_label": READINESS_LABELS[readiness],
-        "readiness_reason": reason,
-        "worked": moment("worked"),
-        "did_not_work": moment("did_not_work"),
-        "opening_line": str(data.get("opening_line", "")).strip(),
-        "objections": objections,
-        "summary": str(data.get("summary", "")).strip(),
-        "warnings": sorted(set(warnings)),
-    }
-
+# =========================================================
+# GENERATE DEBRIEF
+# =========================================================
 
 def generate_debrief(conversation):
-    turns = manager_turns(conversation)
-    if not turns:
+    if not conversation:
+        raise ValueError("Cannot generate a debrief without a rehearsal conversation.")
+
+    manager_lines = get_manager_lines(conversation)
+
+    if not manager_lines:
         raise ValueError("Cannot generate a debrief without manager speech.")
 
-    prompt = build_debrief_prompt(conversation)
-    problems, data = [], {}
+    print("\n[DEBRIEF] transcript used:")
+    print(build_transcript_text(conversation))
 
-    for _ in range(2):  # one retry with corrections
-        extra = ""
-        if problems:
-            extra = (
-                "\n\nYOUR PREVIOUS ANSWER HAD PROBLEMS:\n- " + "\n- ".join(problems) +
-                "\nFix them. Quotes must be copied word for word from one of these MANAGER lines:\n" +
-                "\n".join(f"- {t}" for t in turns)
-            )
-        raw = generate_response(prompt + extra, json_mode=True, temperature=0.2, max_tokens=900)
-        data = parse_json(raw)
-        problems = find_problems(data, turns)
-        if not problems:
-            break
+    base_prompt = build_debrief_prompt(conversation)
+    prompt = base_prompt
+    result = ""
 
-    return finalize_debrief(data, turns, [])
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        result = generate_response(prompt, temperature=0.2)
+
+        invalid = find_invalid_quotes(result, manager_lines)
+        if not invalid:
+            return result
+
+        print(f"[DEBRIEF] attempt {attempt}: invalid quotes {invalid}")
+
+        prompt = (
+            base_prompt
+            + "\n\nCORRECTION: your previous answer quoted text the manager never said: "
+            + "; ".join(f'"{q}"' for q in invalid)
+            + "\nQuote ONLY exact words from the allowed manager lines listed above. Try again."
+        )
+
+    return repair_invalid_quotes(result, manager_lines)

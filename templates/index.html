@@ -1,1246 +1,134 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Manager Feedback Coach</title>
-
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='css/style.css') }}"
-    >
-
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
-
-
 <body>
 
-
-<!-- =========================================================
-     TOP BAR
-     ========================================================= -->
-
 <header class="topbar">
-
-    <div class="topbar-inner">
-
-        <div class="brand">
-
-            <div class="brand-icon">
-                💬
-            </div>
-
-            <div class="brand-text">
-
-                <div class="brand-title">
-                    Manager Feedback Coach
-                </div>
-
-                <div class="brand-subtitle">
-                    Practise fair, specific feedback conversations
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <div class="simulation-indicator">
-
-            <span class="simulation-dot"></span>
-
-            <span>
-                Simulated employee
-            </span>
-
-        </div>
-
-    </div>
-
+    <div class="brand">Manager Feedback Coach</div>
+    <div class="sim-badge"><span class="sim-dot"></span>Rohit is simulated. This is not a prediction of what he will really say.</div>
 </header>
 
 
+<!-- ================= CONTEXT SCREEN ================= -->
+<main id="contextScreen" class="context-screen">
+    <div class="context-card">
 
-<!-- =========================================================
-     MAIN APPLICATION
-     ========================================================= -->
+        <h1>Rohit Menon</h1>
+        <p class="muted">Senior Analyst, Client Servicing · 34 months · Manager: Aditi Rao</p>
 
-<main class="app-container">
+        <h3>Loaded for this conversation</h3>
+        <ul class="facts">
+            <li><strong>14</strong> late arrivals in the last 90 days</li>
+            <li><strong>38 min</strong> average lateness (start time 09:30)</li>
+            <li>Mostly <strong>Mondays and Tuesdays</strong></li>
+            <li>Earlier conversation: <strong>2 June, verbal only</strong>, no written follow-up</li>
+        </ul>
+
+        <h3>Kept out</h3>
+        <p class="muted">Peer (360) comments, HR notes and pay are not used. Performance goals stay out of this lateness conversation.</p>
+
+        <button id="startPrepare" class="primary-button" type="button">Start</button>
+
+        <p class="hint">Use Chrome and headphones, and allow the microphone.</p>
+    </div>
+</main>
 
 
-    <!-- =====================================================
-         CONTEXT SCREEN
-         ===================================================== -->
+<!-- ================= WORKSPACE ================= -->
+<main id="workspace" class="workspace hidden">
 
-    <section
-        id="contextScreen"
-        class="context-screen"
-    >
+    <!-- LEFT: PREPARE -->
+    <section id="preparePanel" class="pane">
 
-        <div class="context-card">
+        <div class="pane-head">
+            <span class="step">1</span>
+            <h2>Prepare</h2>
+        </div>
 
+        <div id="prepareResult" class="pane-scroll"></div>
 
-            <!-- HERO -->
-
-            <div class="context-header">
-
-                <div class="eyebrow">
-                    CONVERSATION PRACTICE
-                </div>
-
-                <h1>
-                    Prepare for a feedback conversation
-                </h1>
-
-                <p>
-                    Practise a realistic conversation about
-                    repeated lateness with a simulated employee.
-                </p>
-
+        <div class="composer">
+            <textarea id="prepareInput" rows="3" placeholder="What do you want help with? (Ctrl+Enter to send)"></textarea>
+            <div class="row end">
+                <button id="prepareButton" class="primary-button" type="button">Ask coach</button>
             </div>
-
-
-            <!-- EMPLOYEE CARD -->
-
-            <div class="employee-card">
-
-                <div class="employee-avatar">
-                    RM
-                </div>
-
-                <div class="employee-details">
-
-                    <div class="employee-name-row">
-
-                        <h2>
-                            Rohit Menon
-                        </h2>
-
-                        <span class="employee-status">
-                            Active scenario
-                        </span>
-
-                    </div>
-
-                    <p>
-                        Senior Analyst, Client Servicing
-                    </p>
-
-                    <div class="employee-meta">
-
-                        <span>
-                            <strong>34</strong>
-                            months tenure
-                        </span>
-
-                        <span class="meta-divider"></span>
-
-                        <span>
-                            Start time:
-                            <strong>09:30</strong>
-                        </span>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-
-            <!-- SCENARIO CARD -->
-
-            <div class="scenario-card">
-
-                <div class="scenario-header">
-
-                    <div>
-
-                        <div class="scenario-title">
-                            Attendance concern
-                        </div>
-
-                        <p>
-                            Focus on observable behaviour and
-                            supported workplace impact.
-                        </p>
-
-                    </div>
-
-                    <div class="scenario-icon">
-                        ⏱
-                    </div>
-
-                </div>
-
-
-                <div class="scenario-facts">
-
-
-                    <div class="fact-card">
-
-                        <span class="fact-number">
-                            14
-                        </span>
-
-                        <span class="fact-label">
-                            late arrivals
-                            <br>
-                            <small>
-                                last 90 days
-                            </small>
-                        </span>
-
-                    </div>
-
-
-                    <div class="fact-card">
-
-                        <span class="fact-number">
-                            38
-                            <small>min</small>
-                        </span>
-
-                        <span class="fact-label">
-                            average
-                            <br>
-                            lateness
-                        </span>
-
-                    </div>
-
-
-                    <div class="fact-card">
-
-                        <span class="fact-number">
-                            Mon–Tue
-                        </span>
-
-                        <span class="fact-label">
-                            predominant
-                            <br>
-                            pattern
-                        </span>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-
-            <!-- PRIVACY NOTICE -->
-
-            <div class="privacy-notice">
-
-                <div class="privacy-icon">
-                    🔒
-                </div>
-
-                <div class="privacy-content">
-
-                    <strong>
-                        Keep the conversation focused
-                    </strong>
-
-                    <p>
-                        Use specific, observable behaviour and
-                        supported work impact. Confidential HR
-                        and 360-feedback information is not
-                        disclosed during practice.
-                    </p>
-
-                </div>
-
-            </div>
-
-
-            <!-- START BUTTONS -->
-
-            <div class="context-actions">
-
-                <button
-                    id="startPrepare"
-                    class="primary-button context-primary-button"
-                    type="button"
-                >
-
-                    <span>
-                        Start with Prepare
-                    </span>
-
-                    <span class="button-arrow">
-                        →
-                    </span>
-
-                </button>
-
-
-                <button
-                    id="startRehearse"
-                    class="secondary-button context-secondary-button"
-                    type="button"
-                >
-                    Go straight to Rehearse
-                </button>
-
-            </div>
-
-
-            <!-- FLOW -->
-
-            <div class="context-footer-note">
-
-                <span>
-                    Prepare
-                </span>
-
-                <span>→</span>
-
-                <span>
-                    Rehearse
-                </span>
-
-                <span>→</span>
-
-                <span>
-                    Debrief
-                </span>
-
-            </div>
-
         </div>
 
     </section>
 
 
+    <!-- RIGHT: REHEARSE / DEBRIEF -->
+    <section class="pane">
 
-    <!-- =====================================================
-         WORKSPACE
-         ===================================================== -->
+        <div id="modeBanner" class="mode-banner rehearse">
+            <div>
+                <strong id="currentModeTitle">REHEARSE</strong>
+                <span id="currentModeDescription"></span>
+            </div>
+            <div class="status">
+                <span id="voiceStatusDot" class="status-dot"></span>
+                <span id="voiceStatus">Ready</span>
+            </div>
+        </div>
 
-    <section
-        id="workspace"
-        class="workspace hidden"
-    >
 
+        <!-- Rehearse view -->
+        <div id="rehearsePanel" class="pane-body">
 
-        <!-- WORKSPACE HEADER -->
-
-        <div class="workspace-header">
-
-            <div class="workspace-title-area">
-
-                <div class="eyebrow">
-                    MANAGER FEEDBACK COACH
+            <div id="liveMeetingCard" class="live-card">
+                <div>
+                    <div id="turnStatus" class="turn-status">Ready to start</div>
+                    <div id="turnDescription" class="turn-description">Press Start, then speak.</div>
                 </div>
-
-                <h1 id="currentModeTitle">
-                    Prepare
-                </h1>
-
-                <p id="currentModeDescription">
-                    Plan the conversation using Situation,
-                    Behaviour and Impact.
-                </p>
-
+                <div class="row">
+                    <button id="startMeeting" class="primary-button" type="button">Start</button>
+                    <button id="endMeeting" class="danger-button" type="button" disabled>End &amp; debrief</button>
+                </div>
             </div>
 
+            <div id="transcript" class="pane-scroll transcript"></div>
 
-            <div class="workspace-status">
-
-                <span
-                    id="voiceStatusDot"
-                    class="status-dot"
-                ></span>
-
-                <span id="voiceStatus">
-                    Ready
-                </span>
-
+            <div class="composer">
+                <textarea id="managerInput" rows="2" placeholder="Speak, or type here (Ctrl+Enter to send)"></textarea>
+                <div class="row">
+                    <button id="micButton" class="voice-button" type="button">🎙 Speak</button>
+                    <button id="sendButton" class="secondary-button" type="button">Send</button>
+                    <button id="stopSpeakingButton" class="secondary-button" type="button">■ Stop Rohit</button>
+                    <span class="latency">First sound: <span id="timeToFirstSound">—</span></span>
+                </div>
             </div>
 
         </div>
 
 
+        <!-- Debrief view -->
+        <div id="debriefPanel" class="pane-body hidden">
 
-        <!-- =================================================
-             MODE NAVIGATION
-             ================================================= -->
+            <div id="debriefResult" class="pane-scroll debrief-result"></div>
 
-        <nav class="mode-navigation">
+            <details class="transcript-details">
+                <summary>Transcript</summary>
+                <div id="debriefTranscript" class="debrief-transcript">No rehearsal recorded.</div>
+            </details>
 
-            <button
-                class="mode-button active"
-                data-mode="prepare"
-                type="button"
-            >
-
-                <span class="mode-number">
-                    1
-                </span>
-
-                <span class="mode-text">
-
-                    <strong>
-                        Prepare
-                    </strong>
-
-                    <small>
-                        Structure your message
-                    </small>
-
-                </span>
-
-            </button>
-
-
-            <div class="mode-connector"></div>
-
-
-            <button
-                class="mode-button"
-                data-mode="rehearse"
-                type="button"
-            >
-
-                <span class="mode-number">
-                    2
-                </span>
-
-                <span class="mode-text">
-
-                    <strong>
-                        Rehearse
-                    </strong>
-
-                    <small>
-                        Practise with Rohit
-                    </small>
-
-                </span>
-
-            </button>
-
-
-            <div class="mode-connector"></div>
-
-
-            <button
-                class="mode-button"
-                data-mode="debrief"
-                type="button"
-            >
-
-                <span class="mode-number">
-                    3
-                </span>
-
-                <span class="mode-text">
-
-                    <strong>
-                        Debrief
-                    </strong>
-
-                    <small>
-                        Review your conversation
-                    </small>
-
-                </span>
-
-            </button>
-
-        </nav>
-
-
-
-        <!-- =================================================
-             PREPARE
-             ================================================= -->
-
-        <section
-            id="preparePanel"
-            class="workspace-panel"
-        >
-
-            <div class="panel-header">
-
-                <div>
-
-                    <div class="eyebrow">
-                        MODE 1 · PREPARATION
-                    </div>
-
-                    <h2>
-                        Prepare the conversation
-                    </h2>
-
-                    <p>
-                        Build a clear message before entering
-                        the conversation.
-                    </p>
-
+            <div class="composer">
+                <div class="row">
+                    <button id="backToRehearse" class="primary-button" type="button">Rehearse again</button>
+                    <button id="debriefButton" class="secondary-button" type="button">Regenerate debrief</button>
                 </div>
-
-                <div class="panel-step-badge">
-                    01
-                </div>
-
             </div>
 
-
-            <div class="prepare-layout">
-
-
-                <!-- INPUT -->
-
-                <div class="input-card">
-
-                    <div class="input-card-heading">
-
-                        <div class="input-icon">
-                            ✎
-                        </div>
-
-                        <div>
-
-                            <label for="prepareInput">
-                                What do you want help with?
-                            </label>
-
-                            <span>
-                                Describe the situation in your own words.
-                            </span>
-
-                        </div>
-
-                    </div>
-
-
-                    <textarea
-                        id="prepareInput"
-                        rows="6"
-                        placeholder="For example: I need to talk to Rohit about repeatedly arriving late."
-                    ></textarea>
-
-
-                    <div class="input-actions">
-
-                        <button
-                            id="prepareButton"
-                            class="primary-button"
-                            type="button"
-                        >
-                            Prepare conversation
-                            <span>→</span>
-                        </button>
-
-                    </div>
-
-
-                    <div
-                        id="prepareResult"
-                        class="result-box"
-                        style="display: none;"
-                    ></div>
-
-                </div>
-
-
-
-                <!-- FRAMEWORK -->
-
-                <div class="framework-card">
-
-                    <div class="framework-header">
-
-                        <div>
-
-                            <div class="framework-title">
-                                Feedback framework
-                            </div>
-
-                            <p>
-                                Keep the conversation specific
-                                and grounded in observable behaviour.
-                            </p>
-
-                        </div>
-
-                        <div class="framework-badge">
-                            SBI
-                        </div>
-
-                    </div>
-
-
-                    <div class="framework-item">
-
-                        <div class="framework-letter">
-                            S
-                        </div>
-
-                        <div>
-
-                            <strong>
-                                Situation
-                            </strong>
-
-                            <p>
-                                When and where did the behaviour occur?
-                            </p>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="framework-item">
-
-                        <div class="framework-letter">
-                            B
-                        </div>
-
-                        <div>
-
-                            <strong>
-                                Behaviour
-                            </strong>
-
-                            <p>
-                                What observable action are you addressing?
-                            </p>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="framework-item">
-
-                        <div class="framework-letter">
-                            I
-                        </div>
-
-                        <div>
-
-                            <strong>
-                                Impact
-                            </strong>
-
-                            <p>
-                                What concrete effect did it have?
-                            </p>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="framework-tip">
-
-                        <span>
-                            💡
-                        </span>
-
-                        <p>
-                            Then listen to Rohit's perspective,
-                            agree on a change, and decide how
-                            progress will be checked.
-                        </p>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-
-            <div class="panel-footer">
-
-                <button
-                    id="goToRehearse"
-                    class="secondary-button"
-                    type="button"
-                >
-                    Continue to Rehearse
-                    <span>→</span>
-                </button>
-
-            </div>
-
-        </section>
-
-
-
-        <!-- =================================================
-             REHEARSE
-             ================================================= -->
-
-        <section
-            id="rehearsePanel"
-            class="workspace-panel hidden"
-        >
-
-            <div class="panel-header rehearse-header">
-
-                <div>
-
-                    <div class="eyebrow">
-                        MODE 2 · LIVE PRACTICE
-                    </div>
-
-                    <h2>
-                        Rehearse the conversation
-                    </h2>
-
-                    <p>
-                        Speak naturally. Rohit responds as a
-                        realistic simulated employee.
-                    </p>
-
-                </div>
-
-
-                <div class="simulated-badge">
-
-                    <span class="simulation-dot"></span>
-
-                    Rohit is simulated
-
-                </div>
-
-            </div>
-
-
-
-            <!-- MEETING CONTROL -->
-
-            <div
-                id="liveMeetingCard"
-                class="live-meeting-card"
-            >
-
-                <div class="live-meeting-left">
-
-                    <div class="meeting-status-row">
-
-                        <span class="meeting-status-icon">
-                            ●
-                        </span>
-
-                        <div
-                            id="turnStatus"
-                            class="turn-status"
-                        >
-                            Ready to start meeting
-                        </div>
-
-                    </div>
-
-
-                    <div
-                        id="turnDescription"
-                        class="turn-description"
-                    >
-                        Click Start Meeting to begin.
-                    </div>
-
-                </div>
-
-
-                <div class="live-meeting-actions">
-
-                    <button
-                        id="startMeeting"
-                        class="primary-button meeting-start-button"
-                        type="button"
-                    >
-                        ▶ Start Meeting
-                    </button>
-
-
-                    <button
-                        id="endMeeting"
-                        class="danger-button meeting-end-button"
-                        type="button"
-                        disabled
-                    >
-                        ⏹ End Meeting
-                    </button>
-
-                </div>
-
-            </div>
-
-
-
-            <!-- VOICE NOTICE -->
-
-            <div class="voice-notice">
-
-                <div class="voice-notice-icon">
-                    🎙
-                </div>
-
-                <div class="voice-notice-content">
-
-                    <strong>
-                        Interrupt Rohit naturally
-                    </strong>
-
-                    <p>
-                        Start speaking while Rohit is talking.
-                        His voice will stop automatically and
-                        he will respond after you finish.
-                    </p>
-
-                </div>
-
-                <div class="voice-notice-tag">
-                    BARGE-IN
-                </div>
-
-            </div>
-
-
-
-            <!-- TRANSCRIPT -->
-
-            <div class="transcript-card">
-
-                <div class="transcript-header">
-
-                    <div>
-
-                        <div class="section-eyebrow">
-                            LIVE TRANSCRIPT
-                        </div>
-
-                        <h3>
-                            Conversation
-                        </h3>
-
-                        <p>
-                            Your rehearsal is captured here
-                            for the final debrief.
-                        </p>
-
-                    </div>
-
-
-                    <div class="transcript-live">
-
-                        <span class="live-dot"></span>
-
-                        LIVE
-
-                    </div>
-
-                </div>
-
-
-                <div
-                    id="transcript"
-                    class="transcript"
-                >
-
-                    <div class="empty-transcript">
-
-                        <div class="empty-icon">
-                            💬
-                        </div>
-
-                        <strong>
-                            Your conversation will appear here
-                        </strong>
-
-                        <span>
-                            Start the meeting and speak naturally.
-                        </span>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-
-
-            <!-- MANAGER INPUT -->
-
-            <div class="manager-input-card">
-
-                <div class="input-card-header">
-
-                    <div>
-
-                        <label for="managerInput">
-                            Your response
-                        </label>
-
-                        <span>
-                            Voice is active during the meeting.
-                        </span>
-
-                    </div>
-
-
-                    <div class="latency-area">
-
-                        <span>
-                            First sound
-                        </span>
-
-                        <div
-                            id="timeToFirstSound"
-                            class="latency-display"
-                        >
-                            —
-                        </div>
-
-                    </div>
-
-                </div>
-
-
-                <textarea
-                    id="managerInput"
-                    rows="4"
-                    placeholder="Speak naturally, or type your response here..."
-                ></textarea>
-
-
-                <div class="manager-controls">
-
-                    <button
-                        id="micButton"
-                        class="voice-button"
-                        type="button"
-                    >
-                        🎙 Speak
-                    </button>
-
-
-                    <button
-                        id="sendButton"
-                        class="secondary-button"
-                        type="button"
-                    >
-                        Send
-                    </button>
-
-
-                    <button
-                        id="stopSpeakingButton"
-                        class="secondary-button"
-                        type="button"
-                    >
-                        ■ Stop Rohit
-                    </button>
-
-
-                    <button
-                        id="finishRehearsal"
-                        class="danger-button"
-                        type="button"
-                    >
-                        Finish rehearsal
-                    </button>
-
-                </div>
-
-            </div>
-
-
-
-            <!-- PRACTICE GUIDE -->
-
-            <div class="practice-guide">
-
-                <div class="guide-icon">
-                    💡
-                </div>
-
-                <div>
-
-                    <strong>
-                        Practice naturally
-                    </strong>
-
-                    <p>
-                        Start with the situation, describe the
-                        observable behaviour, explain the impact,
-                        and give Rohit space to respond.
-                    </p>
-
-                </div>
-
-            </div>
-
-        </section>
-
-
-
-        <!-- =================================================
-             DEBRIEF
-             ================================================= -->
-
-        <section
-            id="debriefPanel"
-            class="workspace-panel hidden"
-        >
-
-            <div class="panel-header">
-
-                <div>
-
-                    <div class="eyebrow">
-                        MODE 3 · REFLECTION
-                    </div>
-
-                    <h2>
-                        Debrief the rehearsal
-                    </h2>
-
-                    <p>
-                        Review what actually happened and
-                        identify specific improvements.
-                    </p>
-
-                </div>
-
-                <div class="panel-step-badge">
-                    03
-                </div>
-
-            </div>
-
-
-
-            <!-- INTRO -->
-
-            <div class="debrief-intro">
-
-                <div class="debrief-icon">
-                    ✓
-                </div>
-
-                <div>
-
-                    <strong>
-                        Feedback based on your actual conversation
-                    </strong>
-
-                    <p>
-                        The coach looks at what you actually said,
-                        including specific moments that worked well
-                        and moments that could be improved.
-                    </p>
-
-                </div>
-
-            </div>
-
-
-
-            <!-- BUTTON -->
-
-            <div class="debrief-actions">
-
-                <button
-                    id="debriefButton"
-                    class="primary-button"
-                    type="button"
-                >
-                    Generate debrief
-                    <span>→</span>
-                </button>
-
-            </div>
-
-
-
-            <!-- RESULT -->
-
-            <div
-                id="debriefResult"
-                class="result-box debrief-result"
-                style="display: none;"
-            ></div>
-
-
-
-            <!-- TRANSCRIPT -->
-
-            <div class="debrief-transcript-card">
-
-                <div class="transcript-header">
-
-                    <div>
-
-                        <div class="section-eyebrow">
-                            REHEARSAL RECORD
-                        </div>
-
-                        <h3>
-                            Conversation transcript
-                        </h3>
-
-                        <p>
-                            The conversation used to generate
-                            your debrief.
-                        </p>
-
-                    </div>
-
-                </div>
-
-
-                <div
-                    id="debriefTranscript"
-                    class="debrief-transcript"
-                >
-                    No rehearsal conversation recorded.
-                </div>
-
-            </div>
-
-
-
-            <!-- DEBRIEF CRITERIA -->
-
-            <div class="debrief-criteria">
-
-                <div class="criteria-item">
-
-                    <span>
-                        01
-                    </span>
-
-                    <div>
-
-                        <strong>
-                            Readiness
-                        </strong>
-
-                        <p>
-                            Are you ready to have the real conversation?
-                        </p>
-
-                    </div>
-
-                </div>
-
-
-                <div class="criteria-item">
-
-                    <span>
-                        02
-                    </span>
-
-                    <div>
-
-                        <strong>
-                            Specific moments
-                        </strong>
-
-                        <p>
-                            What did you say well and what needs work?
-                        </p>
-
-                    </div>
-
-                </div>
-
-
-                <div class="criteria-item">
-
-                    <span>
-                        03
-                    </span>
-
-                    <div>
-
-                        <strong>
-                            Next conversation
-                        </strong>
-
-                        <p>
-                            What can you actually say differently?
-                        </p>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </section>
+        </div>
 
     </section>
 
 </main>
 
-
-
-<!-- =========================================================
-     FOOTER
-     ========================================================= -->
-
-<footer class="app-footer">
-
-    <div class="footer-inner">
-
-        <span>
-            Manager Feedback Coach
-        </span>
-
-        <span>
-            •
-        </span>
-
-        <span>
-            Local prototype
-        </span>
-
-        <span>
-            •
-        </span>
-
-        <span>
-            Synthetic employee data
-        </span>
-
-        <span>
-            •
-        </span>
-
-        <span>
-            Voice rehearsal
-        </span>
-
-    </div>
-
-</footer>
-
-
-
-<!-- =========================================================
-     JAVASCRIPT
-     ========================================================= -->
-
-<script
-    src="{{ url_for('static', filename='js/app.js') }}"
-></script>
-
-
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
-
 </html>

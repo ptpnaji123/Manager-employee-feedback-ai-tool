@@ -1,0 +1,1 @@
+. To go back to Mistral for Rohit, set ROHIT_PROVIDER = "ollama" in conversation_service.py.

@@ -1,93 +1,87 @@
+
 "use strict";
 
 // =========================================================
-// MANAGER FEEDBACK COACH - main application JavaScript
+// MANAGER FEEDBACK COACH
+// STT: Whisper via Flask /api/transcribe
+// TTS: Groq Orpheus via Flask /api/tts
 // =========================================================
 
-// ---------------------------------------------------------
-// CONFIG  (tune turn-taking here)
-// ---------------------------------------------------------
+// CONFIG
 
 const CONFIG = {
     RECOGNITION_LANG: "en-IN",
-
-    // true  = one long recognition session (no gaps between phrases, best for pauses)
-    // false = short sessions (use this if you see duplicated / repeating text)
-    CONTINUOUS: true,
-
-    // How long the manager must be silent before the turn is sent.
-    SILENCE_MS: 2000,             // normal finished-sounding sentence
-    SILENCE_MS_SHORT: 3000,       // very short utterance (probably still thinking)
-    SILENCE_MS_UNFINISHED: 3500,  // sentence ends on "and", "but", "because", ...
+    SILENCE_MS: 800,
+    SILENCE_MS_SHORT: 1000,
+    SILENCE_MS_UNFINISHED: 1400,
     SHORT_TURN_WORDS: 5,
-
-    // Words needed before speech counts as an interruption (ignores tiny noises / echo)
     BARGE_IN_MIN_WORDS: 2,
-
-    RESTART_DELAY_MS: 80
+    MAX_RECORDING_MS: 30000,
+    SPEECH_THRESHOLD: 0.025,
+    TTS_ENDPOINT: "/api/tts"
 };
 
 const UNFINISHED_ENDINGS = new Set([
-    "and", "but", "so", "because", "the", "a", "an", "to", "of", "um", "uh", "like",
-    "that", "which", "if", "or", "then", "with", "for", "i", "you", "is", "are", "we",
+    "and", "but", "so", "because", "the", "a", "an", "to",
+    "of", "um", "uh", "like", "that", "which", "if", "or",
+    "then", "with", "for", "i", "you", "is", "are", "we",
     "it", "was", "in", "on", "at", "my", "your", "about"
 ]);
 
-
-// ---------------------------------------------------------
+// =========================================================
 // STATE
-// ---------------------------------------------------------
+// =========================================================
 
 let conversation = [];
-let currentMode = "prepare";
+let prepareHistory = [];
+let currentMode = "rehearse";
 
 let meetingActive = false;
 let isGeneratingResponse = false;
-let meetingSessionId = 0;     // changes on every start / end -> stale responses are dropped
+let meetingSessionId = 0;
 let debriefRequestId = 0;
 
-// speech recognition
-let recognition = null;
 let recognitionSupported = false;
 let recognitionRunning = false;
 let recognitionShouldRun = false;
-let recognitionSessionId = 0;
-let activeRecognitionSession = 0;
-let recognitionRestartTimer = null;
-
-let committedText = "";   // finished recognition sessions of the current manager turn
-let sessionText = "";     // text of the recognition session that is running now
-
 let managerIsSpeaking = false;
-let silenceTimer = null;
+let whisperIsProcessing = false;
 
-// employee speech
+let whisperStream = null;
+let whisperRecorder = null;
+let whisperAudioContext = null;
+let whisperAnalyser = null;
+let whisperChunks = [];
+let whisperSilenceTimer = null;
+let whisperMaxTimer = null;
+let whisperAnimationFrame = null;
+let whisperStartedAt = 0;
+let whisperHasSpeech = false;
+let whisperFinishRequested = false;
+
 let employeeSpeechStarted = false;
 let speechGenerationId = 0;
-let currentRohit = null;  // { turn, el, full }
+let currentRohit = null;
 let spokenIndex = 0;
 
-// timing
+// Orpheus audio playback state
+let currentAudio = null;
+let currentAudioUrl = null;
+let currentAudioGenerationId = 0;
+
 let sendStartedAt = null;
 let llmFinishedAt = null;
 
-// voices
-let coachVoice = null;
-let rohitVoice = null;
-
-
-// ---------------------------------------------------------
+// =========================================================
 // DOM
-// ---------------------------------------------------------
+// =========================================================
 
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 
 const contextScreen = $("contextScreen");
 const workspace = $("workspace");
-
 const startPrepareButton = $("startPrepare");
 
-const preparePanel = $("preparePanel");
 const rehearsePanel = $("rehearsePanel");
 const debriefPanel = $("debriefPanel");
 
@@ -95,6 +89,7 @@ const currentModeTitle = $("currentModeTitle");
 const currentModeDescription = $("currentModeDescription");
 const voiceStatusDot = $("voiceStatusDot");
 const voiceStatus = $("voiceStatus");
+const modeBanner = $("modeBanner");
 
 const prepareInput = $("prepareInput");
 const prepareButton = $("prepareButton");
@@ -116,68 +111,85 @@ const timeToFirstSound = $("timeToFirstSound");
 const debriefButton = $("debriefButton");
 const debriefResponse = $("debriefResult");
 const debriefTranscript = $("debriefTranscript");
-const modeBanner = $("modeBanner");
 const backToRehearseButton = $("backToRehearse");
 
-
 // =========================================================
-// INIT
+// INITIALIZATION
 // =========================================================
 
 document.addEventListener("DOMContentLoaded", () => {
-    setupModeButtons();
-    setupPrepare();
-    setupRehearsal();
-    setupMeetingControls();
-    setupDebrief();
-    setupSpeechRecognition();
-    setupVoices();
-    showContextScreen();
-    updateWorkspaceHeader("rehearse");
-    updateRecognitionUI();
+    console.log("App.js loaded");
+
+    try {
+        setupModeButtons();
+        setupPrepare();
+        setupRehearsal();
+        setupMeetingControls();
+        setupDebrief();
+        setupWhisperSTT();
+
+        showContextScreen();
+        updateWorkspaceHeader("rehearse");
+        updateRecognitionUI();
+
+        console.log("App initialized successfully");
+    } catch (error) {
+        console.error("App initialization failed:", error);
+    }
 });
 
-
 // =========================================================
-// SCREENS / MODES
+// SCREENS AND MODES
 // =========================================================
 
 function showContextScreen() {
     currentMode = "rehearse";
-    contextScreen.classList.remove("hidden");
-    workspace.classList.add("hidden");
+    contextScreen?.classList.remove("hidden");
+    workspace?.classList.add("hidden");
 }
 
 function startWorkspace() {
-    contextScreen.classList.add("hidden");
-    workspace.classList.remove("hidden");
+    contextScreen?.classList.add("hidden");
+    workspace?.classList.remove("hidden");
     showMode("rehearse");
     prepareInput?.focus();
 }
 
-/**
- * Prepare (left) is always visible.
- * The right side shows either the Rehearse view or the Debrief view.
- */
 function showMode(mode) {
     currentMode = mode === "debrief" ? "debrief" : "rehearse";
 
-    rehearsePanel.classList.toggle("hidden", currentMode === "debrief");
-    debriefPanel.classList.toggle("hidden", currentMode !== "debrief");
+    rehearsePanel?.classList.toggle(
+        "hidden", currentMode === "debrief"
+    );
+
+    debriefPanel?.classList.toggle(
+        "hidden", currentMode !== "debrief"
+    );
 
     updateWorkspaceHeader(currentMode);
 
-    if (currentMode === "debrief") updateDebriefTranscript();
+    if (currentMode === "debrief") {
+        updateDebriefTranscript();
+    }
 }
 
 function updateWorkspaceHeader(mode) {
     const debrief = mode === "debrief";
 
-    modeBanner.className = `mode-banner ${debrief ? "debrief" : "rehearse"}`;
-    currentModeTitle.textContent = debrief ? "DEBRIEF" : "REHEARSE";
-    currentModeDescription.textContent = debrief
-        ? "Rohit has left. This is the coach, based only on what you said."
-        : "You are talking to Rohit (simulated).";
+    if (modeBanner) {
+        modeBanner.className =
+            `mode-banner ${debrief ? "debrief" : "rehearse"}`;
+    }
+
+    if (currentModeTitle) {
+        currentModeTitle.textContent = debrief ? "DEBRIEF" : "REHEARSE";
+    }
+
+    if (currentModeDescription) {
+        currentModeDescription.textContent = debrief
+            ? "Rohit has left. This is the coach, based on what you said."
+            : "You are talking to Rohit (simulated).";
+    }
 }
 
 function setupModeButtons() {
@@ -185,18 +197,15 @@ function setupModeButtons() {
 
     backToRehearseButton?.addEventListener("click", () => {
         if (meetingActive) return;
+
         showMode("rehearse");
         updateTurnStatus("Ready to start", "Press Start, then speak.");
     });
 }
 
-
 // =========================================================
-// PREPARE
+// PREPARE MODE
 // =========================================================
-
-// Prepare is a short chat: the coach remembers earlier messages, so the manager can follow up.
-let prepareHistory = [];
 
 const PREPARE_SUGGESTIONS = [
     "Plan the conversation",
@@ -208,40 +217,43 @@ const PREPARE_SUGGESTIONS = [
 function setupPrepare() {
     if (!prepareButton || !prepareInput) return;
 
-    // quick-start buttons (click, then edit the text and add your own details)
     const chips = document.createElement("div");
     chips.className = "chips";
 
-    PREPARE_SUGGESTIONS.forEach((label) => {
+    PREPARE_SUGGESTIONS.forEach(label => {
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "secondary-button";
-        chip.style.cssText = "min-height:28px;padding:0 10px;font-size:12px;font-weight:500;";
+        chip.style.cssText =
+            "min-height:28px;padding:0 10px;font-size:12px;font-weight:500;";
         chip.textContent = label;
+
         chip.addEventListener("click", () => {
             prepareInput.value = label;
             prepareInput.focus();
         });
+
         chips.appendChild(chip);
     });
 
     prepareInput.parentNode.insertBefore(chips, prepareInput);
 
-    // "start over" button
     const reset = document.createElement("button");
     reset.type = "button";
     reset.className = "secondary-button";
     reset.textContent = "Start over";
+
     reset.addEventListener("click", () => {
         prepareHistory = [];
         prepareResponse.innerHTML = "";
         prepareInput.value = "";
     });
+
     prepareButton.parentNode.insertBefore(reset, prepareButton);
-    
+
     prepareButton.addEventListener("click", sendPrepareMessage);
 
-    prepareInput.addEventListener("keydown", (event) => {
+    prepareInput.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
             sendPrepareMessage();
@@ -253,11 +265,14 @@ async function sendPrepareMessage() {
     const message = prepareInput.value.trim();
 
     if (!message) {
-        appendPrepareEntry("coach", "Please describe what you want help with, or pick one of the buttons above.");
+        appendPrepareEntry(
+            "coach",
+            "Describe what you need help with, or select a suggestion."
+        );
         return;
     }
 
-    const historyForRequest = prepareHistory.slice();
+    const history = prepareHistory.slice();
 
     prepareButton.disabled = true;
     appendPrepareEntry("manager", message);
@@ -268,10 +283,14 @@ async function sendPrepareMessage() {
         const response = await fetch("/api/prepare", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message, history: historyForRequest })
+            body: JSON.stringify({ message, history })
         });
+
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Prepare request failed.");
+
+        if (!response.ok) {
+            throw new Error(data.error || "Prepare request failed.");
+        }
 
         const answer = data.response || "No preparation response returned.";
         pending.textContent = answer;
@@ -282,7 +301,7 @@ async function sendPrepareMessage() {
     } catch (error) {
         console.error("Prepare error:", error);
         pending.textContent = `Error: ${error.message}`;
-        prepareInput.value = message; // give the text back so nothing is lost
+        prepareInput.value = message;
     } finally {
         prepareButton.disabled = false;
     }
@@ -300,14 +319,12 @@ function appendPrepareEntry(who, text) {
     body.className = "chat-text";
     body.textContent = text;
 
-    block.appendChild(label);
-    block.appendChild(body);
+    block.append(label, body);
     prepareResponse.appendChild(block);
     prepareResponse.scrollTop = prepareResponse.scrollHeight;
 
     return body;
 }
-
 
 // =========================================================
 // TEXT HELPERS
@@ -318,363 +335,613 @@ function normalizeSpeechText(text) {
 }
 
 function wordCount(text) {
-    const t = normalizeSpeechText(text);
-    return t ? t.split(" ").length : 0;
+    const value = normalizeSpeechText(text);
+    return value ? value.split(" ").length : 0;
 }
 
-/** Joins two pieces of text, removing an overlap at the seam (protects against repeated phrases). */
-function mergeWithoutDuplication(existing, incoming) {
-    existing = normalizeSpeechText(existing);
-    incoming = normalizeSpeechText(incoming);
+function silenceDelay(text) {
+    const words = normalizeSpeechText(text).toLowerCase().split(" ");
+    const last = (words[words.length - 1] || "").replace(/[^a-z']/g, "");
 
-    if (!existing) return incoming;
-    if (!incoming) return existing;
-
-    const e = existing.toLowerCase();
-    const i = incoming.toLowerCase();
-
-    if (e === i || e.includes(i)) return existing;
-    if (i.includes(e)) return incoming;
-
-    const ew = existing.split(" ");
-    const iw = incoming.split(" ");
-    const max = Math.min(ew.length, iw.length);
-
-    for (let size = max; size >= 1; size--) {
-        const end = ew.slice(ew.length - size).join(" ").toLowerCase();
-        const start = iw.slice(0, size).join(" ").toLowerCase();
-        if (end === start) {
-            const rest = iw.slice(size).join(" ");
-            return rest ? `${existing} ${rest}` : existing;
-        }
+    if (UNFINISHED_ENDINGS.has(last)) {
+        return CONFIG.SILENCE_MS_UNFINISHED;
     }
-    return `${existing} ${incoming}`;
+
+    if (words.length < CONFIG.SHORT_TURN_WORDS) {
+        return CONFIG.SILENCE_MS_SHORT;
+    }
+
+    return CONFIG.SILENCE_MS;
 }
 
-function currentSpeech() {
-    return normalizeSpeechText(mergeWithoutDuplication(committedText, sessionText));
+function updateManagerInput(text) {
+    if (!managerInput) return;
+
+    managerInput.value = text;
+    managerInput.scrollTop = managerInput.scrollHeight;
 }
 
+function clearManagerSpeechState() {
+    managerIsSpeaking = false;
+
+    clearTimeout(whisperSilenceTimer);
+    whisperSilenceTimer = null;
+
+    if (managerInput) managerInput.value = "";
+}
 
 // =========================================================
-// SPEECH RECOGNITION
+// WHISPER SPEECH-TO-TEXT
 // =========================================================
 
-function setupSpeechRecognition() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function setupWhisperSTT() {
+    recognitionSupported =
+        !!navigator.mediaDevices?.getUserMedia &&
+        !!window.MediaRecorder;
 
-    if (!SR) {
-        recognitionSupported = false;
-        micButton.disabled = true;
-        micButton.textContent = "Mic unavailable";
+    if (!recognitionSupported) {
+        if (micButton) {
+            micButton.disabled = true;
+            micButton.textContent = "Mic unavailable";
+        }
+
         updateVoiceStatus("Voice unavailable");
         return;
     }
 
-    recognitionSupported = true;
-    micButton.addEventListener("click", toggleMicrophone);
+    micButton?.addEventListener("click", toggleMicrophone);
 }
 
-function toggleMicrophone() {
-    if (!recognitionSupported) return;
+async function toggleMicrophone() {
+    if (!meetingActive || whisperIsProcessing) return;
 
     if (recognitionRunning) {
-        stopRecognition();
-        updateTurnStatus("Microphone paused", "Press Speak to listen again.");
-        updateVoiceStatus("Ready");
+        finishManagerTurn();
         return;
     }
 
-    if (!meetingActive) {
-        updateTurnStatus("Start the meeting first", "Press Start Meeting before using the microphone.");
-        return;
+    if (employeeSpeechStarted) {
+        markRohitInterrupted();
+        stopRohitSpeaking();
     }
 
-    startManagerListening(true);
+    await startManagerListening(true);
 }
 
-function createRecognitionInstance() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return null;
+async function startManagerListening(fresh = true) {
+    if (
+        !meetingActive ||
+        recognitionRunning ||
+        whisperIsProcessing
+    ) {
+        return;
+    }
 
-    const instance = new SR();
-    instance.continuous = CONFIG.CONTINUOUS;
-    instance.interimResults = true;
-    instance.maxAlternatives = 1;
-    instance.lang = CONFIG.RECOGNITION_LANG;
+    if (!navigator.mediaDevices?.getUserMedia) {
+        updateVoiceStatus("Microphone unavailable");
+        updateTurnStatus(
+            "Microphone unavailable",
+            "Use Chrome and allow microphone access."
+        );
+        return;
+    }
 
-    const id = ++recognitionSessionId;
-    activeRecognitionSession = id;
-    const live = () => id === activeRecognitionSession;
+    try {
+        if (fresh) clearManagerSpeechState();
 
-    instance.onstart = () => {
-        if (!live()) return;
-        recognitionRunning = true;
-        updateRecognitionUI();
-    };
+        whisperStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        });
 
-    // The manager is making sound again -> they are NOT finished. Cancel the pending send.
-    instance.onspeechstart = () => {
-        if (!live()) return;
-        clearSilenceTimer();
-    };
-
-    // Sound stopped -> start counting silence.
-    instance.onspeechend = () => {
-        if (!live()) return;
-        armSilenceTimer();
-    };
-
-    instance.onresult = (event) => {
-        if (!live()) return;
-        handleRecognitionResult(event);
-    };
-
-    instance.onerror = (event) => {
-        if (!live()) return;
-
-        console.warn("Speech recognition error:", event.error);
-        recognitionRunning = false;
-        commitSession();
-        updateRecognitionUI();
-
-        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-            recognitionShouldRun = false;
-            updateVoiceStatus("Microphone permission required");
-            updateTurnStatus("Microphone permission required", "Allow microphone access in your browser.");
+        // The meeting might have ended while permission was requested.
+        if (!meetingActive) {
+            stopWhisperResources();
             return;
         }
 
-        if (recognitionShouldRun && meetingActive) scheduleRecognitionRestart();
-    };
+        whisperChunks = [];
+        whisperHasSpeech = false;
+        whisperFinishRequested = false;
+        whisperStartedAt = Date.now();
 
-    instance.onend = () => {
-        if (!live()) return;
-        recognitionRunning = false;
-        commitSession();
+        const mimeType = [
+            "audio/webm;codecs=opus",
+            "audio/webm",
+            "audio/ogg;codecs=opus"
+        ].find(type => MediaRecorder.isTypeSupported(type));
+
+        whisperRecorder = mimeType
+            ? new MediaRecorder(whisperStream, { mimeType })
+            : new MediaRecorder(whisperStream);
+
+        whisperRecorder.ondataavailable = event => {
+            if (event.data?.size > 0) {
+                whisperChunks.push(event.data);
+            }
+        };
+
+        whisperRecorder.onerror = event => {
+            console.error("Recording error:", event.error);
+            stopWhisperResources();
+            recognitionRunning = false;
+            updateRecognitionUI();
+        };
+
+        whisperRecorder.onstop = handleWhisperRecordingStopped;
+
+        whisperAudioContext = new (
+            window.AudioContext || window.webkitAudioContext
+        )();
+
+        whisperAnalyser = whisperAudioContext.createAnalyser();
+        whisperAnalyser.fftSize = 2048;
+
+        const source =
+            whisperAudioContext.createMediaStreamSource(whisperStream);
+
+        source.connect(whisperAnalyser);
+
+        await whisperAudioContext.resume();
+
+        whisperRecorder.start(250);
+        recognitionRunning = true;
+        recognitionShouldRun = true;
+        managerIsSpeaking = false;
+
+        whisperMaxTimer = setTimeout(() => {
+            if (recognitionRunning) finishManagerTurn();
+        }, CONFIG.MAX_RECORDING_MS);
+
         updateRecognitionUI();
+        updateVoiceStatus("Listening");
+        updateTurnStatus(
+            "Listening",
+            "Speak naturally. Pause when you finish your response."
+        );
 
-        if (recognitionShouldRun && meetingActive) scheduleRecognitionRestart();
-    };
+        monitorWhisperSilence();
 
-    return instance;
+    } catch (error) {
+        console.error("Microphone startup error:", error);
+
+        stopWhisperResources();
+        recognitionRunning = false;
+        recognitionShouldRun = false;
+
+        updateRecognitionUI();
+        updateVoiceStatus("Microphone permission required");
+        updateTurnStatus(
+            "Microphone access failed",
+            "Allow microphone access in Chrome, then press Speak again."
+        );
+    }
 }
 
-/** A recognition session finished: keep its text, start the next session with an empty buffer. */
-function commitSession() {
-    committedText = mergeWithoutDuplication(committedText, sessionText);
-    sessionText = "";
-}
+function monitorWhisperSilence() {
+    if (!recognitionRunning || !whisperAnalyser) return;
 
-function startRecognition() {
-    if (!recognitionSupported || !recognitionShouldRun || !meetingActive || recognitionRunning) return;
+    const samples = new Uint8Array(whisperAnalyser.fftSize);
+    whisperAnalyser.getByteTimeDomainData(samples);
 
-    if (recognitionRestartTimer) {
-        clearTimeout(recognitionRestartTimer);
-        recognitionRestartTimer = null;
+    let sum = 0;
+
+    for (const sample of samples) {
+        const value = (sample - 128) / 128;
+        sum += value * value;
     }
 
-    recognition = createRecognitionInstance();
-    if (!recognition) return;
+    const rms = Math.sqrt(sum / samples.length);
+
+    if (rms > CONFIG.SPEECH_THRESHOLD) {
+        whisperHasSpeech = true;
+        managerIsSpeaking = true;
+
+        clearTimeout(whisperSilenceTimer);
+
+        updateVoiceStatus("Listening");
+        updateTurnStatus(
+            "You're speaking",
+            "Rohit will respond after you finish."
+        );
+
+        whisperSilenceTimer = setTimeout(() => {
+            if (recognitionRunning && whisperHasSpeech) {
+                finishManagerTurn();
+            }
+        }, silenceDelay(managerInput?.value || ""));
+    }
+
+    whisperAnimationFrame =
+        requestAnimationFrame(monitorWhisperSilence);
+}
+
+function finishManagerTurn() {
+    if (!recognitionRunning || whisperFinishRequested) return;
+
+    whisperFinishRequested = true;
+    recognitionShouldRun = false;
+    recognitionRunning = false;
+    managerIsSpeaking = false;
+
+    clearTimeout(whisperSilenceTimer);
+    clearTimeout(whisperMaxTimer);
+
+    if (whisperAnimationFrame !== null) {
+        cancelAnimationFrame(whisperAnimationFrame);
+        whisperAnimationFrame = null;
+    }
+
+    if (whisperRecorder && whisperRecorder.state !== "inactive") {
+        whisperRecorder.stop();
+    } else {
+        stopWhisperResources();
+        updateRecognitionUI();
+    }
+
+    updateRecognitionUI();
+
+    if (whisperHasSpeech) {
+        updateVoiceStatus("Transcribing...");
+        updateTurnStatus(
+            "Processing speech",
+            "Whisper is converting your audio to text."
+        );
+    }
+}
+
+async function handleWhisperRecordingStopped() {
+    const chunks = [...whisperChunks];
+    const mimeType = whisperRecorder?.mimeType || "audio/webm";
+    const elapsed = Date.now() - whisperStartedAt;
+    const hasSpeech = whisperHasSpeech;
+
+    stopWhisperResources();
+
+    if (!hasSpeech || !chunks.length || elapsed < 300) {
+        updateRecognitionUI();
+
+        if (meetingActive) {
+            updateVoiceStatus("Ready");
+            updateTurnStatus(
+                "No speech detected",
+                "Press Speak and try again."
+            );
+        }
+
+        return;
+    }
+
+    if (!meetingActive) return;
+
+    const extension = mimeType.includes("ogg") ? "ogg" :
+        mimeType.includes("mp4") ? "mp4" : "webm";
+
+    const audioBlob = new Blob(chunks, { type: mimeType });
+
+    whisperIsProcessing = true;
+    updateRecognitionUI();
+    updateVoiceStatus("Transcribing...");
+
+    const session = meetingSessionId;
 
     try {
-        recognition.start();
+        const formData = new FormData();
+        formData.append("audio", audioBlob, `recording.${extension}`);
+
+        const response = await fetch("/api/transcribe", {
+            method: "POST",
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.error || `Whisper request failed (${response.status}).`
+            );
+        }
+
+        if (session !== meetingSessionId || !meetingActive) return;
+
+        const text = normalizeSpeechText(data.text);
+
+        if (!text) {
+            updateVoiceStatus("No speech detected");
+            updateTurnStatus(
+                "No speech detected",
+                "Try speaking a little longer."
+            );
+            return;
+        }
+
+        console.log("Whisper transcript:", text);
+
+        // Release the Whisper processing lock before Rohit's response.
+        // Otherwise, the next recording may be blocked.
+        whisperIsProcessing = false;
+        updateRecognitionUI();
+
+        if (managerInput) {
+            managerInput.value = "";
+        }
+
+        await sendManagerMessage(text);
+
     } catch (error) {
-        console.warn("Recognition start error:", error.message);
-        recognitionRunning = false;
-        scheduleRecognitionRestart();
+        console.error("Whisper transcription error:", error);
+
+        updateVoiceStatus("Transcription failed");
+        updateTurnStatus(
+            "Could not transcribe audio",
+            error.message
+        );
+    } finally {
+        whisperIsProcessing = false;
+        updateRecognitionUI();
+
+        if (
+            meetingActive &&
+            !isGeneratingResponse &&
+            !employeeSpeechStarted &&
+            !recognitionRunning
+        ) {
+            updateVoiceStatus("Ready");
+        }
     }
 }
 
 function stopRecognition() {
     recognitionShouldRun = false;
-
-    if (recognitionRestartTimer) {
-        clearTimeout(recognitionRestartTimer);
-        recognitionRestartTimer = null;
-    }
-
-    // invalidate the current session so late events cannot leak into the next turn
-    activeRecognitionSession = ++recognitionSessionId;
-
-    if (recognition) {
-        try { recognition.abort(); } catch (error) { /* ignore */ }
-    }
-
     recognitionRunning = false;
+    managerIsSpeaking = false;
+
+    clearTimeout(whisperSilenceTimer);
+    clearTimeout(whisperMaxTimer);
+
+    if (whisperAnimationFrame !== null) {
+        cancelAnimationFrame(whisperAnimationFrame);
+        whisperAnimationFrame = null;
+    }
+
+    // Discard recordings when deliberately stopping or ending the meeting.
+    if (whisperRecorder && whisperRecorder.state !== "inactive") {
+        whisperRecorder.onstop = null;
+
+        try {
+            whisperRecorder.stop();
+        } catch (error) {
+            console.warn("Recorder cleanup:", error);
+        }
+    }
+
+    stopWhisperResources();
     updateRecognitionUI();
 }
 
-function scheduleRecognitionRestart() {
-    if (!recognitionShouldRun || !meetingActive || recognitionRestartTimer) return;
+function stopWhisperResources() {
+    clearTimeout(whisperSilenceTimer);
+    clearTimeout(whisperMaxTimer);
 
-    recognitionRestartTimer = setTimeout(() => {
-        recognitionRestartTimer = null;
-        if (!recognitionShouldRun || !meetingActive || recognitionRunning) return;
-        startRecognition();
-    }, CONFIG.RESTART_DELAY_MS);
+    whisperSilenceTimer = null;
+    whisperMaxTimer = null;
+
+    if (whisperAnimationFrame !== null) {
+        cancelAnimationFrame(whisperAnimationFrame);
+        whisperAnimationFrame = null;
+    }
+
+    if (whisperStream) {
+        whisperStream.getTracks().forEach(track => track.stop());
+        whisperStream = null;
+    }
+
+    if (whisperAudioContext) {
+        whisperAudioContext.close().catch(error =>
+            console.warn("AudioContext cleanup:", error)
+        );
+        whisperAudioContext = null;
+    }
+
+    whisperAnalyser = null;
+    whisperRecorder = null;
+    whisperChunks = [];
+    whisperHasSpeech = false;
 }
 
-/** Throw away everything heard so far (e.g. Rohit's voice picked up by the mic) and listen fresh. */
 function restartRecognitionFresh() {
+    if (!meetingActive || employeeSpeechStarted) return;
+
     stopRecognition();
-    clearManagerSpeechState();
-    recognitionShouldRun = true;
-    scheduleRecognitionRestart();
+    startManagerListening(true);
 }
-
-function handleRecognitionResult(event) {
-    if (!event.results) return;
-
-    sessionText = normalizeSpeechText(
-        Array.from(event.results).map((r) => (r[0] ? r[0].transcript : "")).join(" ")
-    );
-
-    const text = currentSpeech();
-    if (!text) return;
-
-    // ---- barge-in ----
-    if (employeeSpeechStarted) {
-        if (wordCount(text) < CONFIG.BARGE_IN_MIN_WORDS) return;
-        handleManagerInterruption();
-    }
-
-    managerIsSpeaking = true;
-    updateManagerInput(text);
-    updateTurnStatus("You're speaking", "Rohit is listening. He replies after you pause (or press Send).");
-    updateVoiceStatus("Listening");
-
-    armSilenceTimer();
-}
-
 
 // =========================================================
-// TURN-TAKING  (silence detection with an adaptive delay)
+// ORPHEUS TEXT-TO-SPEECH
 // =========================================================
 
-function silenceDelay(text) {
-    const words = normalizeSpeechText(text).toLowerCase().split(" ").filter(Boolean);
-    const last = (words[words.length - 1] || "").replace(/[^a-z']/g, "");
+// The Flask endpoint should return audio/wav bytes from Groq Orpheus.
+// The backend manages the Groq API key and the selected voice.
 
-    if (UNFINISHED_ENDINGS.has(last)) return CONFIG.SILENCE_MS_UNFINISHED; // sentence obviously unfinished
-    if (words.length < CONFIG.SHORT_TURN_WORDS) return CONFIG.SILENCE_MS_SHORT;
-    return CONFIG.SILENCE_MS;
-}
+function stopOrpheusAudio() {
+    // Invalidate any pending TTS request or playback callbacks.
+    currentAudioGenerationId++;
 
-function clearSilenceTimer() {
-    if (silenceTimer) {
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-    }
-}
+    if (currentAudio) {
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+        currentAudio.ontimeupdate = null;
 
-function armSilenceTimer() {
-    clearSilenceTimer();
+        currentAudio.pause();
 
-    if (!meetingActive || !managerIsSpeaking) return;
-
-    silenceTimer = setTimeout(() => {
-        silenceTimer = null;
-        if (managerIsSpeaking && !employeeSpeechStarted && !isGeneratingResponse && meetingActive) {
-            finishManagerTurn();
+        try {
+            currentAudio.currentTime = 0;
+        } catch (_) {
+            // The audio may not have loaded yet.
         }
-    }, silenceDelay(currentSpeech()));
+
+        currentAudio = null;
+    }
+
+    if (currentAudioUrl) {
+        URL.revokeObjectURL(currentAudioUrl);
+        currentAudioUrl = null;
+    }
 }
 
-function finishManagerTurn() {
-    if (isGeneratingResponse) return;
+async function playOrpheusSpeech(text, options = {}) {
+    const {
+        onStarted = null,
+        onProgress = null,
+        onFinished = null,
+        onError = null
+    } = options;
 
-    const message = currentSpeech();
-    if (!message) return;
+    stopOrpheusAudio();
 
-    console.log("FINAL MANAGER TURN:", message);
+    const generationId = currentAudioGenerationId;
+    const normalizedText = normalizeSpeechText(text);
 
-    // stop the mic BEFORE sending so late events cannot change the message
-    stopRecognition();
-    clearManagerSpeechState();
-    sendManagerMessage(message);
+    if (!normalizedText) {
+        onFinished?.();
+        return;
+    }
+
+    let audioUrl = null;
+    let audio = null;
+    let completed = false;
+    let started = false;
+
+    const finish = (error = null) => {
+        if (completed) return;
+        completed = true;
+
+        if (generationId === currentAudioGenerationId) {
+            if (currentAudio === audio) {
+                currentAudio = null;
+            }
+
+            if (currentAudioUrl === audioUrl) {
+                currentAudioUrl = null;
+            }
+
+            if (audio) {
+                audio.onended = null;
+                audio.onerror = null;
+                audio.ontimeupdate = null;
+            }
+
+            if (audioUrl) {
+                URL.revokeObjectURL(audioUrl);
+            }
+        } else if (audioUrl) {
+            URL.revokeObjectURL(audioUrl);
+        }
+
+        if (error) {
+            onError?.(error);
+        }
+
+        onFinished?.(error);
+    };
+
+    try {
+        const response = await fetch(CONFIG.TTS_ENDPOINT, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            // The backend selects the configured Orpheus voice.
+            body: JSON.stringify({ text: normalizedText })
+        });
+
+        if (generationId !== currentAudioGenerationId) return;
+
+        if (!response.ok) {
+            let message = `TTS request failed (${response.status}).`;
+
+            try {
+                const data = await response.json();
+                message = data.error || message;
+            } catch (_) {
+                // Keep the HTTP status message if the response isn't JSON.
+            }
+
+            throw new Error(message);
+        }
+
+        const blob = await response.blob();
+
+        if (generationId !== currentAudioGenerationId) return;
+
+        if (!blob.size) {
+            throw new Error("The TTS endpoint returned empty audio.");
+        }
+
+        audioUrl = URL.createObjectURL(blob);
+        audio = new Audio(audioUrl);
+
+        currentAudio = audio;
+        currentAudioUrl = audioUrl;
+
+        audio.preload = "auto";
+
+        audio.ontimeupdate = () => {
+            if (
+                generationId !== currentAudioGenerationId ||
+                !audio.duration ||
+                !Number.isFinite(audio.duration)
+            ) {
+                return;
+            }
+
+            const progress = Math.min(
+                1,
+                Math.max(0, audio.currentTime / audio.duration)
+            );
+
+            onProgress?.(progress);
+        };
+
+        audio.onended = () => {
+            if (generationId !== currentAudioGenerationId) return;
+            finish();
+        };
+
+        audio.onerror = () => {
+            if (generationId !== currentAudioGenerationId) return;
+            finish(new Error("The generated audio could not be played."));
+        };
+
+        await audio.play();
+
+        if (generationId !== currentAudioGenerationId) {
+            audio.pause();
+            return;
+        }
+
+        started = true;
+        onStarted?.();
+
+    } catch (error) {
+        if (generationId !== currentAudioGenerationId) return;
+
+        console.error("Orpheus TTS error:", error);
+
+        if (audioUrl && currentAudioUrl !== audioUrl) {
+            URL.revokeObjectURL(audioUrl);
+        }
+
+        finish(error);
+
+        if (!started) {
+            console.warn("Orpheus speech did not start.");
+        }
+    }
 }
-
-function clearManagerSpeechState() {
-    committedText = "";
-    sessionText = "";
-    managerIsSpeaking = false;
-    clearSilenceTimer();
-    updateManagerInput("");
-}
-
-function updateManagerInput(text) {
-    if (!managerInput) return;
-    managerInput.value = text;
-    managerInput.scrollTop = managerInput.scrollHeight;
-}
-
-
-// =========================================================
-// INTERRUPTION / BARGE-IN
-// =========================================================
-
-function handleManagerInterruption() {
-    if (!employeeSpeechStarted) return;
-
-    console.log("BARGE-IN: manager interrupted Rohit.");
-
-    markRohitInterrupted();
-    stopRohitSpeaking();
-
-    liveMeetingCard.classList.remove("rohit-speaking");
-    liveMeetingCard.classList.add("interruption-active");
-
-    updateTurnStatus("You interrupted Rohit", "His voice has stopped. Finish what you want to say.");
-    updateVoiceStatus("Listening");
-}
-
-/** Rohit's turn is kept in the conversation, cut at the point where he was actually stopped. */
-function markRohitInterrupted() {
-    if (!currentRohit) return;
-
-    const { turn, el, full } = currentRohit;
-    if (spokenIndex >= full.length - 1) return; // he had effectively finished
-
-    const heard = full.slice(0, spokenIndex).trim();
-    const marked = heard ? `${heard}— [interrupted]` : "[interrupted]";
-
-    turn.text = marked;
-    if (el) el.textContent = marked;
-}
-
-function stopRohitSpeaking() {
-    speechGenerationId++;
-    employeeSpeechStarted = false;
-
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-
-    liveMeetingCard?.classList.remove("rohit-speaking");
-}
-
-
-// =========================================================
-// VOICES  (two different voices so the speakers are never confused)
-// =========================================================
-
-function setupVoices() {
-    if (!("speechSynthesis" in window)) return;
-    pickVoices();
-    window.speechSynthesis.onvoiceschanged = pickVoices;
-}
-
-function pickVoices() {
-    const voices = window.speechSynthesis.getVoices();
-    if (!voices.length) return;
-
-    const english = voices.filter((v) => /^en/i.test(v.lang));
-    const male = english.find((v) => /(ravi|david|mark|james|daniel|male|rishi|guy|george|alex)/i.test(v.name));
-    const female = english.find((v) => /(zira|heera|samantha|female|susan|karen|aria|jenny|libby|veena)/i.test(v.name));
-
-    rohitVoice = male || english[0] || null;
-    coachVoice = female || english.find((v) => v !== rohitVoice) || null;
-}
-
 
 // =========================================================
 // REHEARSAL CONTROLS
@@ -682,10 +949,13 @@ function pickVoices() {
 
 function setupRehearsal() {
     sendButton?.addEventListener("click", () => {
-        const message = managerInput ? managerInput.value.trim() : "";
-        if (!message) return;
+        const message = managerInput?.value.trim();
+        if (!message || !meetingActive || isGeneratingResponse) return;
 
-        if (employeeSpeechStarted) handleManagerInterruption();
+        if (employeeSpeechStarted) {
+            markRohitInterrupted();
+            stopRohitSpeaking();
+        }
 
         stopRecognition();
         clearManagerSpeechState();
@@ -695,35 +965,48 @@ function setupRehearsal() {
     stopSpeakingButton?.addEventListener("click", () => {
         markRohitInterrupted();
         stopRohitSpeaking();
+
         updateTurnStatus("Rohit stopped", "You can speak now.");
         updateVoiceStatus("Listening");
+
         if (meetingActive) startManagerListening(true);
     });
 
-    managerInput?.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && event.ctrlKey) {
+    managerInput?.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
             sendButton?.click();
         }
     });
 }
 
-
 // =========================================================
-// SEND MANAGER MESSAGE -> ROHIT
+// CONVERSATION WITH ROHIT
 // =========================================================
 
 function cleanRohitResponse(text) {
     let response = normalizeSpeechText(text);
     if (!response) return "";
 
-    response = response.replace(/^```(?:text)?/i, "").replace(/```$/i, "").trim();
+    response = response
+        .replace(/^```(?:text)?/i, "")
+        .replace(/```$/i, "")
+        .trim();
+
     response = response.replace(/\[[^\]]*\]|\([^)]*\)/g, "").trim();
 
-    const prefixes = ["rohit — simulated employee:", "simulated employee:", "employee:", "rohit:"];
+    const prefixes = [
+        "rohit — simulated employee:",
+        "simulated employee:",
+        "employee:",
+        "rohit:"
+    ];
+
     let changed = true;
+
     while (changed) {
         changed = false;
+
         for (const prefix of prefixes) {
             if (response.toLowerCase().startsWith(prefix)) {
                 response = response.slice(prefix.length).trim();
@@ -735,32 +1018,38 @@ function cleanRohitResponse(text) {
     if (response.length >= 2 && /^["'].*["']$/.test(response)) {
         response = response.slice(1, -1).trim();
     }
+
     return response;
 }
 
 async function sendManagerMessage(message) {
     message = normalizeSpeechText(message);
-    if (!message || isGeneratingResponse) return;
+
+    if (!message || isGeneratingResponse || !meetingActive) return;
 
     const session = meetingSessionId;
 
     stopRohitSpeaking();
-    managerIsSpeaking = false;
     isGeneratingResponse = true;
 
     updateTurnStatus("Rohit is thinking", "Preparing his response...");
     updateVoiceStatus("Thinking");
 
-    sendButton.disabled = true;
-    micButton.disabled = true;
+    if (sendButton) sendButton.disabled = true;
+    if (micButton) micButton.disabled = true;
 
-    // history BEFORE this message (the backend adds the latest message itself)
-    const previousConversation = conversation.map((t) => ({ speaker: t.speaker, text: t.text }));
+    const previousConversation = conversation.map(t => ({
+        speaker: t.speaker,
+        text: t.text
+    }));
 
-    // The manager's turn is stored immediately, so it is never lost - even if the meeting
-    // is ended while Rohit is still "thinking".
     conversation.push({ speaker: "manager", text: message });
     addTranscriptMessage("manager", message);
+
+    // Clear the input so the previous message isn't reused.
+    if (managerInput) {
+        managerInput.value = "";
+    }
 
     sendStartedAt = performance.now();
 
@@ -768,125 +1057,184 @@ async function sendManagerMessage(message) {
         const response = await fetch("/api/rehearse", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message, conversation: previousConversation })
+            body: JSON.stringify({
+                message,
+                conversation: previousConversation
+            })
         });
+
         const data = await response.json();
 
-        // the rehearsal was ended / restarted while waiting -> discard this stale reply
         if (session !== meetingSessionId) return;
 
-        if (!response.ok) throw new Error(data.error || "Rehearsal request failed.");
+        if (!response.ok) {
+            throw new Error(data.error || "Rehearsal request failed.");
+        }
 
-        const rohitResponse = cleanRohitResponse(data.response);
-        if (!rohitResponse) throw new Error("Rohit returned an empty response.");
+        const answer = cleanRohitResponse(data.response);
+
+        if (!answer) {
+            throw new Error("Rohit returned an empty response.");
+        }
 
         llmFinishedAt = performance.now();
 
-        const turn = { speaker: "rohit", text: rohitResponse };
+        const turn = { speaker: "rohit", text: answer };
         conversation.push(turn);
-        const el = addTranscriptMessage("rohit", rohitResponse);
 
-        speakEmployeeResponse(rohitResponse, turn, el);
+        const element = addTranscriptMessage("rohit", answer);
+
+        await speakEmployeeResponse(answer, turn, element);
 
     } catch (error) {
         if (session !== meetingSessionId) return;
 
         console.error("Rehearsal error:", error);
-        addTranscriptMessage("system", `Error: ${error.message}`);
-        updateTurnStatus("Something went wrong", "Check that Flask and Ollama are running.");
-        updateVoiceStatus("Error");
 
+        addTranscriptMessage("system", `Error: ${error.message}`);
+
+        updateTurnStatus(
+            "Something went wrong",
+            "Check Flask, the API route, and Ollama."
+        );
+
+        updateVoiceStatus("Error");
     } finally {
         if (session === meetingSessionId) {
             isGeneratingResponse = false;
-            sendButton.disabled = false;
-            micButton.disabled = false;
+
+            if (sendButton) sendButton.disabled = false;
+            updateRecognitionUI();
         }
     }
 }
 
-
 // =========================================================
-// ROHIT TEXT-TO-SPEECH
+// ROHIT TEXT-TO-SPEECH — ORPHEUS
 // =========================================================
 
-function speakEmployeeResponse(text, turn, el) {
-    if (!("speechSynthesis" in window)) {
-        updateTurnStatus("Rohit responded", "Browser speech synthesis is unavailable.");
-        updateVoiceStatus("Voice unavailable");
-        if (meetingActive) startManagerListening(true);
-        return;
-    }
+ // =========================================================
+ // ROHIT TEXT-TO-SPEECH — ORPHEUS
+ // =========================================================
 
-    window.speechSynthesis.cancel();
-
+function speakEmployeeResponse(text, turn, element) {
     const generationId = ++speechGenerationId;
-    currentRohit = { turn, el, full: text };
+
+    currentRohit = {
+        turn,
+        el: element,
+        full: text
+    };
+
+    spokenIndex = 0;
+    employeeSpeechStarted = false;
+
+    return playOrpheusSpeech(text, {
+        onStarted: () => {
+            if (generationId !== speechGenerationId) return;
+
+            employeeSpeechStarted = true;
+
+            const total = Math.round(
+                performance.now() -
+                (sendStartedAt || performance.now())
+            );
+
+            const model = Math.round(
+                (llmFinishedAt || performance.now()) -
+                (sendStartedAt || performance.now())
+            );
+
+            if (timeToFirstSound) {
+                timeToFirstSound.textContent =
+                    `${total} ms (model ${model} ms)`;
+            }
+
+            updateTurnStatus(
+                "Rohit is speaking (simulated)",
+                "Wait until he finishes, then speak."
+            );
+
+            updateVoiceStatus("Rohit speaking");
+
+            liveMeetingCard?.classList.add("rohit-speaking");
+            liveMeetingCard?.classList.remove("interruption-active");
+        },
+
+        onProgress: progress => {
+            if (generationId !== speechGenerationId) return;
+
+            spokenIndex = Math.min(
+                text.length,
+                Math.floor(text.length * progress)
+            );
+        },
+
+        onError: error => {
+            console.error("Rohit TTS failed:", error);
+
+            if (generationId === speechGenerationId) {
+                updateTurnStatus(
+                    "Speech playback failed",
+                    error.message || "Check the Flask /api/tts route."
+                );
+
+                updateVoiceStatus("Error");
+            }
+        },
+
+        onFinished: error => {
+            if (generationId !== speechGenerationId) return;
+
+            employeeSpeechStarted = false;
+            currentRohit = null;
+
+            liveMeetingCard?.classList.remove("rohit-speaking");
+
+            if (!error && meetingActive) {
+                updateTurnStatus(
+                    "Your turn",
+                    "Speak naturally. Rohit is listening."
+                );
+
+                updateVoiceStatus("Ready");
+            }
+
+            if (meetingActive) {
+                startManagerListening(true);
+            }
+        }
+    });
+}
+
+function markRohitInterrupted() {
+    if (!currentRohit) return;
+
+    const { turn, el, full } = currentRohit;
+
+    if (spokenIndex >= full.length - 1) return;
+
+    const heard = full.slice(0, spokenIndex).trim();
+    const marked = heard
+        ? `${heard} — [interrupted]`
+        : "[interrupted]";
+
+    turn.text = marked;
+
+    if (el) el.textContent = marked;
+}
+
+function stopRohitSpeaking() {
+    speechGenerationId++;
+    employeeSpeechStarted = false;
+
+    stopOrpheusAudio();
+
+    currentRohit = null;
     spokenIndex = 0;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-IN";
-    utterance.rate = 0.98;
-    utterance.pitch = 0.9;
-    if (rohitVoice) utterance.voice = rohitVoice;
-
-    utterance.onstart = () => {
-        if (generationId !== speechGenerationId) return;
-
-        employeeSpeechStarted = true;
-
-        const total = Math.round(performance.now() - (sendStartedAt || performance.now()));
-        const llm = Math.round((llmFinishedAt || performance.now()) - (sendStartedAt || performance.now()));
-        timeToFirstSound.textContent = `${total} ms (model ${llm} ms)`;
-
-        updateTurnStatus("Rohit is speaking (simulated)", "You can interrupt him at any time.");
-        updateVoiceStatus("Rohit speaking");
-
-        liveMeetingCard.classList.add("rohit-speaking");
-        liveMeetingCard.classList.remove("interruption-active");
-    };
-
-    utterance.onboundary = (event) => {
-        if (generationId !== speechGenerationId) return;
-        if (typeof event.charIndex === "number") spokenIndex = event.charIndex;
-    };
-
-    utterance.onend = () => {
-        if (generationId !== speechGenerationId) return;
-
-        employeeSpeechStarted = false;
-        currentRohit = null;
-        liveMeetingCard.classList.remove("rohit-speaking");
-
-        if (meetingActive) {
-            // discard anything the mic heard while Rohit was talking (his own voice / echo)
-            restartRecognitionFresh();
-            updateTurnStatus("Your turn", "Speak naturally. Rohit is listening.");
-            updateVoiceStatus("Listening");
-        } else {
-            updateTurnStatus("Response complete", "Start the meeting to continue.");
-            updateVoiceStatus("Ready");
-        }
-    };
-
-    utterance.onerror = (event) => {
-        if (event.error === "canceled" || event.error === "interrupted") return;
-
-        console.warn("Speech synthesis error:", event.error);
-        employeeSpeechStarted = false;
-        liveMeetingCard.classList.remove("rohit-speaking");
-        if (meetingActive) startManagerListening(true);
-    };
-
-    // Start listening BEFORE Rohit speaks, so the first words of an interruption are not lost.
-    if (meetingActive) {
-        recognitionShouldRun = true;
-        startRecognition();
-    }
-
-    window.speechSynthesis.speak(utterance);
+    liveMeetingCard?.classList.remove("rohit-speaking");
 }
-
 
 // =========================================================
 // MEETING CONTROLS
@@ -900,10 +1248,9 @@ function setupMeetingControls() {
 function startMeeting() {
     if (meetingActive) return;
 
-    // new rehearsal = completely fresh state
-    showMode("rehearse");
     meetingSessionId++;
     debriefRequestId++;
+
     meetingActive = true;
     isGeneratingResponse = false;
     conversation = [];
@@ -913,75 +1260,69 @@ function startMeeting() {
     stopRecognition();
     clearManagerSpeechState();
 
-    transcript.innerHTML = "";
-    debriefTranscript.textContent = "Rehearsal in progress.";
-    debriefResponse.textContent = "";
-    debriefResponse.style.display = "none";
-    timeToFirstSound.textContent = "—";
-    managerInput.value = "";
+    if (transcript) transcript.innerHTML = "";
 
-    startMeetingButton.disabled = true;
-    endMeetingButton.disabled = false;
-    sendButton.disabled = false;
-    micButton.disabled = false;
+    if (debriefTranscript) {
+        debriefTranscript.textContent = "Rehearsal in progress.";
+    }
 
-    liveMeetingCard.classList.add("meeting-active");
-    liveMeetingCard.classList.remove("rohit-speaking", "interruption-active");
+    if (debriefResponse) {
+        debriefResponse.textContent = "";
+        debriefResponse.style.display = "none";
+    }
 
-    updateTurnStatus("Meeting started", "You have the floor. Start the conversation.");
-    updateVoiceStatus("Listening");
+    if (timeToFirstSound) timeToFirstSound.textContent = "—";
+    if (managerInput) managerInput.value = "";
+
+    if (startMeetingButton) startMeetingButton.disabled = true;
+    if (endMeetingButton) endMeetingButton.disabled = false;
+    if (sendButton) sendButton.disabled = false;
+    if (micButton) micButton.disabled = false;
+
+    liveMeetingCard?.classList.add("meeting-active");
+    liveMeetingCard?.classList.remove(
+        "rohit-speaking",
+        "interruption-active"
+    );
+
+    showMode("rehearse");
+
+    updateTurnStatus(
+        "Meeting started",
+        "You have the floor. Start the conversation."
+    );
+
+    updateVoiceStatus("Ready");
+    updateRecognitionUI();
 
     speakMeetingAnnouncement();
 }
 
-/** The coach (a different voice from Rohit) announces the start. */
 function speakMeetingAnnouncement() {
-    if (!("speechSynthesis" in window)) {
-        startManagerListening(true);
-        return;
-    }
+    const announcement =
+        "Coach here. The rehearsal has started. " +
+        "Rohit is simulated. You can begin when you're ready.";
 
-    const utterance = new SpeechSynthesisUtterance(
-        "Coach here. The rehearsal has started. Rohit is simulated. You can begin when you're ready."
-    );
-    utterance.lang = "en-IN";
-    utterance.rate = 1.0;
-    utterance.pitch = 1.15;
-    if (coachVoice) utterance.voice = coachVoice;
+    playOrpheusSpeech(announcement, {
+        onError: error => {
+            console.error("Meeting announcement TTS failed:", error);
+            updateVoiceStatus("Error");
+        },
 
-    const done = () => { if (meetingActive) startManagerListening(true); };
-    utterance.onend = done;
-    utterance.onerror = done;
-
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+        onFinished: () => {
+            if (meetingActive) {
+                startManagerListening(true);
+            }
+        }
+    });
 }
 
 function speakCoach(text) {
-    if (!("speechSynthesis" in window)) return;
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-IN";
-    utterance.pitch = 1.15;
-    if (coachVoice) utterance.voice = coachVoice;
-
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-}
-
-/** fresh = true: start a clean recognition session with an empty buffer. */
-function startManagerListening(fresh = false) {
-    if (!meetingActive) return;
-
-    employeeSpeechStarted = false;
-
-    updateTurnStatus("Your turn", "Speak naturally. Rohit is listening.");
-    updateVoiceStatus("Listening");
-
-    if (fresh && !recognitionRunning) clearManagerSpeechState();
-
-    recognitionShouldRun = true;
-    startRecognition();
+    playOrpheusSpeech(text, {
+        onError: error => {
+            console.error("Coach TTS failed:", error);
+        }
+    });
 }
 
 function endMeeting() {
@@ -990,35 +1331,41 @@ function endMeeting() {
         return;
     }
 
-    meetingSessionId++;          // any Rohit reply still in flight is now stale and ignored
+    meetingSessionId++;
     meetingActive = false;
     isGeneratingResponse = false;
-    currentRohit = null;
 
     markRohitInterrupted();
     stopRohitSpeaking();
     stopRecognition();
     clearManagerSpeechState();
 
-    startMeetingButton.disabled = false;
-    endMeetingButton.disabled = true;
-    sendButton.disabled = false;
-    micButton.disabled = false;
+    if (startMeetingButton) startMeetingButton.disabled = false;
+    if (endMeetingButton) endMeetingButton.disabled = true;
+    if (sendButton) sendButton.disabled = false;
+    if (micButton) micButton.disabled = false;
 
-    liveMeetingCard.classList.remove("meeting-active", "rohit-speaking", "interruption-active");
+    liveMeetingCard?.classList.remove(
+        "meeting-active",
+        "rohit-speaking",
+        "interruption-active"
+    );
 
     updateTurnStatus("Meeting ended", "Generating your debrief...");
-    speakCoach("Rehearsal over. Rohit has left. Here is your debrief.");
     updateVoiceStatus("Ready");
 
-    // clear the previous debrief immediately so an old result can never be shown for a new rehearsal
-    debriefResponse.textContent = "";
-    debriefResponse.style.display = "none";
+    speakCoach(
+        "Rehearsal over. Rohit has left. Here is your debrief."
+    );
+
+    if (debriefResponse) {
+        debriefResponse.textContent = "";
+        debriefResponse.style.display = "none";
+    }
 
     showMode("debrief");
     generateDebrief();
 }
-
 
 // =========================================================
 // DEBRIEF
@@ -1029,25 +1376,41 @@ function setupDebrief() {
 }
 
 async function generateDebrief() {
-    const snapshot = conversation.map((t) => ({ speaker: t.speaker, text: t.text }));
+    const snapshot = conversation.map(t => ({
+        speaker: t.speaker,
+        text: t.text
+    }));
 
     if (!snapshot.length) {
-        showDebriefMessage("No rehearsal conversation was recorded. Complete a rehearsal before generating a debrief.");
+        showDebriefMessage(
+            "No rehearsal conversation was recorded. " +
+            "Complete a rehearsal before generating a debrief."
+        );
         return;
     }
 
-    const managerTurns = snapshot.filter((t) => t.speaker === "manager" && String(t.text || "").trim());
+    const managerTurns = snapshot.filter(t =>
+        t.speaker === "manager" && String(t.text || "").trim()
+    );
 
     if (!managerTurns.length) {
-        showDebriefMessage("No manager speech was recorded. Complete a rehearsal before generating a debrief.");
+        showDebriefMessage(
+            "No manager speech was recorded. " +
+            "Complete a rehearsal before generating a debrief."
+        );
         return;
     }
 
     const requestId = ++debriefRequestId;
 
-    debriefButton.disabled = true;
+    if (debriefButton) debriefButton.disabled = true;
+
     updateDebriefTranscript();
-    showDebriefMessage(`Generating debrief for this rehearsal (${managerTurns.length} manager turn(s))...`);
+
+    showDebriefMessage(
+        `Generating debrief for this rehearsal ` +
+        `(${managerTurns.length} manager turn(s))...`
+    );
 
     try {
         const response = await fetch("/api/debrief", {
@@ -1055,57 +1418,77 @@ async function generateDebrief() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ conversation: snapshot })
         });
+
         const data = await response.json();
 
-        if (requestId !== debriefRequestId) return; // a newer rehearsal started meanwhile
+        if (requestId !== debriefRequestId) return;
 
-        if (!response.ok) throw new Error(data.error || "Debrief request failed.");
+        if (!response.ok) {
+            throw new Error(data.error || "Debrief request failed.");
+        }
 
-        showDebriefMessage(data.response || "No debrief response returned.");
+        showDebriefMessage(
+            data.response || "No debrief response returned."
+        );
+
     } catch (error) {
         if (requestId !== debriefRequestId) return;
+
         console.error("Debrief error:", error);
         showDebriefMessage(`Error: ${error.message}`);
+
     } finally {
-        if (requestId === debriefRequestId) debriefButton.disabled = false;
+        if (requestId === debriefRequestId && debriefButton) {
+            debriefButton.disabled = false;
+        }
     }
 }
 
-const DEBRIEF_HEADINGS = /^(READINESS CALL|GOOD MOMENT|MOMENT TO IMPROVE|USABLE OPENING LINE|LIKELY OBJECTION \d|COACHING SUMMARY)\s*:?$/i;
+const DEBRIEF_HEADINGS =
+    /^(READINESS CALL|GOOD MOMENT|MOMENT TO IMPROVE|USABLE OPENING LINE|LIKELY OBJECTION \d|COACHING SUMMARY)\s*:?$/i;
 
 function showDebriefMessage(message) {
+    if (!debriefResponse) return;
+
     debriefResponse.style.display = "block";
     debriefResponse.innerHTML = "";
 
     let afterReadiness = false;
 
-    String(message).split("\n").forEach((raw) => {
+    String(message).split("\n").forEach(raw => {
         const line = raw.trim().replace(/^\*+|\*+$/g, "").trim();
+
         if (!line) return;
 
-        const el = document.createElement("div");
+        const element = document.createElement("div");
 
         if (DEBRIEF_HEADINGS.test(line)) {
-            el.className = "debrief-heading";
-            el.textContent = line.replace(/:$/, "");
+            element.className = "debrief-heading";
+            element.textContent = line.replace(/:$/, "");
             afterReadiness = /^READINESS CALL/i.test(line);
         } else {
-            el.className = "debrief-line" + (afterReadiness ? " readiness" : "");
-            el.textContent = raw.trim();
+            element.className =
+                "debrief-line" + (afterReadiness ? " readiness" : "");
+
+            element.textContent = raw.trim();
             afterReadiness = false;
         }
-        debriefResponse.appendChild(el);
+
+        debriefResponse.appendChild(element);
     });
 }
 
 function updateDebriefTranscript() {
+    if (!debriefTranscript) return;
+
     const lines = conversation
-        .filter((t) => t && t.text && String(t.text).trim())
-        .map((t) => {
+        .filter(t => t && t.text && String(t.text).trim())
+        .map(t => {
             const speaker =
-                t.speaker === "manager" ? "YOU — MANAGER"
-                : t.speaker === "rohit" ? "ROHIT — SIMULATED EMPLOYEE"
-                : "SYSTEM";
+                t.speaker === "manager" ? "YOU — MANAGER" :
+                t.speaker === "rohit" ? "ROHIT — SIMULATED EMPLOYEE" :
+                "SYSTEM";
+
             return `${speaker}: ${t.text}`;
         });
 
@@ -1114,14 +1497,13 @@ function updateDebriefTranscript() {
         : "No rehearsal conversation recorded.";
 }
 
-
 // =========================================================
 // TRANSCRIPT
 // =========================================================
 
-/** Adds a line and returns the element holding the text (so an interrupted line can be edited). */
 function addTranscriptMessage(speaker, text) {
     text = normalizeSpeechText(text);
+
     if (!transcript || !text) return null;
 
     transcript.querySelector(".empty-transcript")?.remove();
@@ -1134,27 +1516,27 @@ function addTranscriptMessage(speaker, text) {
 
     const label = document.createElement("div");
     label.className = "transcript-speaker";
+
     label.textContent =
-        speaker === "manager" ? "You — Manager"
-        : speaker === "rohit" ? "Rohit — Simulated Employee"
-        : "System";
+        speaker === "manager" ? "You — Manager" :
+        speaker === "rohit" ? "Rohit — Simulated Employee" :
+        "System";
 
     const body = document.createElement("div");
     body.className = "transcript-text";
     body.textContent = text;
 
-    message.appendChild(label);
-    message.appendChild(body);
+    message.append(label, body);
     entry.appendChild(message);
     transcript.appendChild(entry);
+
     transcript.scrollTop = transcript.scrollHeight;
 
     return body;
 }
 
-
 // =========================================================
-// STATUS UI
+// STATUS AND UI
 // =========================================================
 
 function updateTurnStatus(title, description) {
@@ -1166,12 +1548,27 @@ function updateVoiceStatus(status) {
     if (voiceStatus) voiceStatus.textContent = status;
     if (!voiceStatusDot) return;
 
-    voiceStatusDot.classList.remove("status-listening", "status-speaking", "status-thinking", "status-error");
+    voiceStatusDot.classList.remove(
+        "status-listening",
+        "status-speaking",
+        "status-thinking",
+        "status-error"
+    );
 
-    if (status === "Listening") voiceStatusDot.classList.add("status-listening");
-    if (status === "Rohit speaking") voiceStatusDot.classList.add("status-speaking");
-    if (status === "Thinking") voiceStatusDot.classList.add("status-thinking");
-    if (["Error", "Voice unavailable", "Microphone permission required"].includes(status)) {
+    if (status === "Listening") {
+        voiceStatusDot.classList.add("status-listening");
+    }
+
+    if (status === "Rohit speaking") {
+        voiceStatusDot.classList.add("status-speaking");
+    }
+
+    if (status === "Thinking") {
+        voiceStatusDot.classList.add("status-thinking");
+    }
+
+    if (["Error", "Voice unavailable",
+         "Microphone permission required"].includes(status)) {
         voiceStatusDot.classList.add("status-error");
     }
 }
@@ -1185,20 +1582,29 @@ function updateRecognitionUI() {
         return;
     }
 
+    micButton.disabled =
+        !meetingActive || whisperIsProcessing || isGeneratingResponse;
+
     micButton.classList.toggle("listening", recognitionRunning);
-    micButton.textContent = recognitionRunning ? "🎙 Listening" : "🎙 Speak";
+
+    micButton.textContent = whisperIsProcessing
+        ? "Transcribing..."
+        : recognitionRunning
+            ? "■ Finish speaking"
+            : "🎙 Speak";
 }
 
-
 // =========================================================
-// KEYBOARD + CLEANUP
+// CLEANUP
 // =========================================================
 
-document.addEventListener("keydown", (event) => {
+document.addEventListener("keydown", event => {
     if (event.key === "Escape" && employeeSpeechStarted) {
         markRohitInterrupted();
         stopRohitSpeaking();
+
         updateTurnStatus("Rohit stopped", "You can speak now.");
+
         if (meetingActive) startManagerListening(true);
     }
 });
@@ -1206,6 +1612,8 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("beforeunload", () => {
     meetingActive = false;
     recognitionShouldRun = false;
+
     stopRohitSpeaking();
     stopRecognition();
 });
+    

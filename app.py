@@ -4,7 +4,9 @@ from services.prepare_service import prepare_feedback
 from services.conversation_service import get_rohit_response
 from services.debrief_service import generate_debrief
 
-
+from flask import request, jsonify
+from services.transcription_service import transcribe_audio
+from services.tts_service import generate_speech
 app = Flask(__name__)
 
 
@@ -77,6 +79,42 @@ def debrief():
         print(error)
         return jsonify({"error": str(error)}), 500
 
+@app.route("/api/transcribe", methods=["POST"])
+def transcribe():
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file received."}), 400
 
+    audio = request.files["audio"]
+
+    try:
+        text = transcribe_audio(
+            audio.read(),
+            audio.filename or "recording.webm",
+        )
+        return jsonify({"text": text})
+    except Exception as error:
+        print("Transcription error:", error)
+        return jsonify({"error": str(error)}), 500
+
+@app.route("/api/tts", methods=["POST"])
+def text_to_speech():
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+
+    if not text:
+        return jsonify({"error": "Text is required."}), 400
+
+    try:
+        audio = generate_speech(text)
+
+        return (
+            audio,
+            200,
+            {"Content-Type": "audio/wav"}
+        )
+
+    except Exception as error:
+        app.logger.exception("Orpheus TTS failed")
+        return jsonify({"error": str(error)}), 500
 if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=5000)

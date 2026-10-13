@@ -3,6 +3,13 @@ import re
 from pathlib import Path
 
 from services.llm_service import generate_response
+from services.meeting_memory import (
+    format_for_prompt,
+    get_snapshot,
+    rebuild_from_conversation,
+    update_async,
+    wait_for_update,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -12,12 +19,12 @@ PROMPT_FILE = BASE_DIR / "prompts" / "rehearsal_prompt.txt"
 
 # "groq" = Llama 3.3 70B (set GROQ_LLM_MODEL in .env to change). "ollama" = local Mistral.
 ROHIT_PROVIDER = "groq"
-# Small, fast model used only to label what the manager said.
+# Small, fast model used only to label ambiguous manager lines.
 CLASSIFIER_MODEL = "llama-3.1-8b-instant"
 
-MAX_HISTORY_TURNS = 14
+MAX_HISTORY_TURNS = 20
 MAX_QUESTIONS_PER_CONVERSATION = 3
-FALLBACK_ACCEPTANCE = "Okay, understood."
+NEUTRAL_FALLBACK = "Give me a second, let me think about that."
 
 
 # =========================================================
@@ -48,17 +55,19 @@ def _clean_turns(conversation):
     return turns
 
 
+def _format_turns(turns):
+    return "\n".join(
+        f"{'MANAGER' if s == 'manager' else 'ROHIT'}: {t}" for s, t in turns
+    )
+
+
 def build_conversation_history(conversation):
     turns = _clean_turns(conversation)
 
     if not turns:
         return "No previous conversation."
 
-    turns = turns[-MAX_HISTORY_TURNS:]
-
-    return "\n".join(
-        f"{'MANAGER' if s == 'manager' else 'ROHIT'}: {t}" for s, t in turns
-    )
+    return _format_turns(turns[-MAX_HISTORY_TURNS:])
 
 
 # =========================================================
@@ -94,7 +103,7 @@ APOLOGY_PATTERNS = ["sorry", "apolog"]
 
 EXPLAINED_PATTERNS = [
     "difficult", "struggl", "hard for me", "personal", "at home", "bit much",
-    "going through", "rough", "challenging", "going on",
+    "going through", "rough", "challenging", "going on", "outside work", "tough",
 ]
 
 QUESTION_STARTS = (
@@ -102,9 +111,20 @@ QUESTION_STARTS = (
     "will", "is", "are", "do", "does", "did", "have", "has", "should",
 )
 
+# Serious consequences for his job: dismissal, suspension, final warning.
 SEVERE = re.compile(
-    r"\b(terminat\w*|fired|sacked|let you go|letting you go|let go|dismiss\w*|"
-    r"final warning|suspend\w*|show you the door|you'?re out|last day)\b",
+    r"\b(terminat\w*|fired|sacked|let you go|letting you go|let go|dismiss\w*|suspend\w*|"
+    r"show you the door|you(?:'re| are) out|out of the company|your last day|"
+    r"last warning|final warning|written warning|start the process|"
+    r"pack your (things|stuff|bags)|all the best for your future)\b",
+    re.I,
+)
+
+# "you have not been fired", "you're not being terminated": these must not count as severe news.
+_TERMS = r"(?:terminat\w*|fired|sacked|let go|dismiss\w*|suspend\w*)"
+NEGATED = re.compile(
+    rf"\b(?:not|never|no|isn'?t|aren'?t|wasn'?t|weren'?t|haven'?t|hasn'?t|won'?t|don'?t)\b"
+    rf"(?:\s+\w+){{0,3}}\s+{_TERMS}",
     re.I,
 )
 
@@ -118,14 +138,32 @@ CARING = re.compile(
     r"(what'?s (getting|been getting) in the way|what'?s going on|anything (going on|i should know|"
     r"bothering|on your mind)|is (something|everything)|everything (ok|okay|alright)|"
     r"how are you (doing|holding up|feeling) (lately|these days|with)|how have things been|"
-    r"is there anything|can i help|how can i support|help you with|what support)",
+    r"is there anything|can i help|how can i (help|support)|help you with|what support)",
+    re.I,
+)
+
+# She asks HIM for a way forward.
+ASKS_INPUT = re.compile(
+    r"\b(how (can|do|should|could|would) we (solve|fix|resolve|handle|address|improve|move|sort)|"
+    r"what (can|do|should|would) we do|what do you (suggest|propose|think|recommend)|"
+    r"any (suggestions|ideas)|what would help|what (do|would) you (need|like)|"
+    r"your (thoughts|view|suggestion|plan)|how do you plan|what('s| is) your plan|"
+    r"how (will|are) you (fix|solve|make sure|going to))\b",
+    re.I,
+)
+
+# She asks whether he remembers / heard what she said.
+RECALL = re.compile(
+    r"\b(what (i|did i) (said|say|told|mention\w*)|do you (know|remember) what i|"
+    r"did you (hear|catch|get) what i|as i (said|mentioned) (earlier|before)|"
+    r"what i (said|told you) (earlier|before)|just before this (talk|conversation|meeting))\b",
     re.I,
 )
 
 ACCUSE = re.compile(
     r"\b(always|never|lazy|careless|unreliable|unacceptable|not good enough|don'?t care|"
     r"doesn'?t care|disappointed|disrespectful|irresponsible|useless|entitled|attitude|"
-    r"what is wrong with you|your fault)\b",
+    r"what is wrong with you|your fault|dig your own (hole|grave))\b",
     re.I,
 )
 
@@ -135,6 +173,15 @@ LATENESS_WORDS = re.compile(
 PERF_WORDS = re.compile(
     r"\b(performance|backlog|csat|goals?|targets?|rating|review|certification|tickets?)\b", re.I
 )
+
+SHORT_OK = re.compile(
+    r"\b(thanks|thank|okay|ok|right|sure|yes|yeah|no|good|great|fine|alright|sorry|hello|hi|hey)\b", re.I
+)
+
+
+def is_heavy(text):
+    """True if the line announces or threatens serious consequences (ignoring negated mentions)."""
+    return bool(SEVERE.search(NEGATED.sub(" ", text)))
 
 
 def _contains_any(text, patterns):
@@ -155,25 +202,36 @@ def _manager_asked_question(message):
 # INTENT: what did the manager just do?
 # =========================================================
 
-INTENT_LABELS = ["small_talk", "caring_question", "severe", "off_topic", "unclear", "other"]
+INTENT_LABELS = ["small_talk", "caring_question", "off_topic", "unclear", "other"]
+
+HEAVY_BASE = (
+    "Aditi just told you something with serious consequences for your job (for example dismissal, "
+    "suspension or a final warning). Do NOT promise to change anything and do NOT agree to anything "
+    "you are not being asked to agree to. Do not argue about rules or rights (no 'you can't do this').\n"
+)
+
+HEAVY_PHASES = {
+    1: "This is the FIRST time you hear it. React with stunned disbelief in a few words, and ask "
+       "what has happened or why. Do not defend yourself yet.",
+    2: "It is sinking in. Do not repeat your earlier shocked words. If the reason she gave is partly "
+       "true, admit that part honestly in one short clause. Then say it feels out of proportion and "
+       "mention something you have done well (use only the facts you know above). Do not beg.",
+    3: "You are past the shock. Go flat and quiet, or a bit bitter, or ask something practical "
+       "(is it final, notice, handover). Never repeat an earlier reaction.",
+}
 
 INTENT_GUIDANCE = {
     "small_talk": (
         "Aditi is greeting you or making small talk. Answer like a normal person at work, "
         "in one short, light sentence. Do NOT mention lateness, attendance, goals, tickets or any "
-        "work problem. You do not know why she wants to talk yet. You may ask one short, natural "
-        "question back."
+        "work problem. You do not know why she wants to talk yet. Do not comment on her mood or "
+        "schedule. You may ask one short, natural question back."
     ),
     "caring_question": (
         "Aditi asked an open, caring question about you. Answer honestly but briefly and in general "
-        "words, as someone who is private. If you are comfortable you may hint that there are a few "
-        "things going on outside work, with no details. Do not recite facts or numbers and do not "
-        "promise anything."
-    ),
-    "severe": (
-        "Aditi just said something very serious, like firing you or a final warning. React like a "
-        "real person: shock, disbelief, maybe anger or a stunned pause. Ask what is going on or why. "
-        "Do NOT promise to change anything, do NOT agree, and do NOT talk about being on time."
+        "words, as someone who is private. Only if the state below says you may, hint that there are "
+        "a few things going on outside work, with no details. Do not recite facts or numbers and do "
+        "not promise anything."
     ),
     "off_topic": (
         "Aditi said something unrelated to work. React with mild confusion or a short natural answer. "
@@ -183,41 +241,73 @@ INTENT_GUIDANCE = {
         "You did not catch or understand what Aditi said. Say so naturally and briefly, for example "
         "asking her to repeat it. Do not guess what she meant."
     ),
+    "asks_input": (
+        "Aditi is asking YOU for a way forward. Answer with statements, not a question. Offer one "
+        "realistic, modest step you could take, in your own words, or say what would make it easier "
+        "for you without giving private details. Stay consistent with the facts above. If something "
+        "serious about your job was said earlier, that changes how willing you are."
+    ),
+    "recall": (
+        "Aditi is checking whether you remember what she said earlier. Answer from the conversation "
+        "so far, in your own words, and stay accurate. Do not invent anything she did not say."
+    ),
 }
 
-# intents where Rohit is allowed to reply with a question
+AFTER_HEAVY_NEWS = (
+    "Something serious about your job was said earlier in this meeting. Check the facts above to see "
+    "whether it still stands. React to her new line in that light and with the feelings listed above. "
+    "If she blames or insults you, respond to that (hurt, bitter or calm pushback), never ignore it. "
+    "If the reason she gave is partly true, admit that part honestly, but say if the consequence feels "
+    "out of proportion and mention what you have done well (only facts you know above). "
+    "Do not beg and do not promise to change anything unless she clearly proposes a concrete plan. "
+    "Do not repeat an earlier reaction."
+)
+
+# intents where Rohit may reply with a question
 QUESTION_FRIENDLY = {"small_talk", "off_topic"}
-QUESTION_ALWAYS = {"severe", "unclear"}
+QUESTION_ALWAYS = {"heavy_news", "unclear"}
 
 
-def classify_intent(manager_message):
+def classify_intent(manager_message, prior_manager_lines, work_topic_raised, conversation_tail):
     words = len(manager_message.split())
 
-    if SEVERE.search(manager_message):
-        return "severe"
+    if is_heavy(manager_message):
+        return "heavy_news"
 
-    if SMALL_TALK.search(manager_message) and words <= 8:
+    if RECALL.search(manager_message):
+        return "recall"
+
+    # Small talk only counts at the start, before any work topic or serious news.
+    if (
+        SMALL_TALK.search(manager_message)
+        and words <= 8
+        and not work_topic_raised
+        and not any(is_heavy(m) for m in prior_manager_lines)
+    ):
         return "small_talk"
 
     if CARING.search(manager_message):
         return "caring_question"
 
-    if words <= 2 and not re.search(
-        r"\b(thanks|thank|okay|ok|right|sure|yes|no|good|great|fine|alright)\b",
-        manager_message, re.I,
-    ):
+    if ASKS_INPUT.search(manager_message):
+        return "asks_input"
+
+    if words <= 2 and not SHORT_OK.search(manager_message):
         return "unclear"
 
     prompt = (
-        "Classify the manager's line in a workplace conversation with an employee.\n"
-        "Labels: small_talk, caring_question, severe, off_topic, unclear, other\n"
-        "- small_talk: greeting or casual chit-chat\n"
+        "Classify the manager's LAST line in a workplace conversation with an employee.\n"
+        "Labels: small_talk, caring_question, off_topic, unclear, other\n"
+        "- small_talk: a greeting or casual chit-chat at the very start, unrelated to the topic\n"
         "- caring_question: asks how the employee is really doing or what is getting in the way\n"
-        "- severe: announces or threatens termination, suspension or a final warning\n"
-        "- off_topic: unrelated to work or to the conversation\n"
+        "- off_topic: clearly unrelated to work and to the conversation\n"
         "- unclear: garbled, cut off or meaningless\n"
-        "- other: normal feedback discussion, accusation, proposal, agreement or closing\n"
-        f'Line: "{manager_message}"\n'
+        "- other: anything else, including follow-ups, questions, feedback, accusations, proposals, "
+        "answers and closing\n"
+        "If the line continues the ongoing discussion it is other, even if it begins with a greeting "
+        "or the employee's name. When unsure, answer other.\n\n"
+        f"Conversation so far:\n{conversation_tail or '(start of conversation)'}\n\n"
+        f'Last line: "{manager_message}"\n'
         "Reply with ONE label only."
     )
 
@@ -247,18 +337,18 @@ def topics_raised(manager_message, conversation):
     return {
         "lateness": bool(LATENESS_WORDS.search(said)),
         "performance": bool(PERF_WORDS.search(said)),
+        "strengths": False,
     }
 
 
-MOOD_AFTER_CARING = {"defensive": "guarded", "guarded": "neutral", "neutral": "open", "open": "open", "shaken": "shaken"}
-MOOD_AFTER_ACCUSE = {"neutral": "guarded", "open": "guarded", "guarded": "defensive", "defensive": "defensive", "shaken": "defensive"}
+MOOD_AFTER_CARING = {"defensive": "guarded", "guarded": "neutral", "neutral": "open", "open": "open"}
+MOOD_AFTER_ACCUSE = {"neutral": "guarded", "open": "guarded", "guarded": "defensive", "defensive": "defensive"}
 
 MOOD_GUIDANCE = {
-    "neutral": "Rohit is calm and a little reserved. Normal professional tone.",
-    "open": "Rohit feels heard and is more relaxed. He answers a bit more openly, but is still private.",
-    "guarded": "Rohit feels judged. He gives shorter answers, is a little cold, and shares less.",
-    "defensive": "Rohit feels attacked. He objects calmly but firmly and gives very little away.",
-    "shaken": "Rohit is rattled by something serious she said. His words are short and a bit unsteady.",
+    "neutral": "Calm and a little reserved. Normal professional tone.",
+    "open": "Feels heard and is more relaxed. Answers a bit more openly, but is still private.",
+    "guarded": "Feels judged. Gives shorter answers, is a little cold, and shares less.",
+    "defensive": "Feels attacked. Objects calmly but firmly and gives very little away.",
 }
 
 
@@ -266,16 +356,17 @@ def compute_mood(manager_messages, current_intent):
     mood = "neutral"
 
     for message in manager_messages:
-        if SEVERE.search(message):
-            mood = "shaken"
-        elif ACCUSE.search(message):
+        if ACCUSE.search(message):
             mood = MOOD_AFTER_ACCUSE[mood]
         elif CARING.search(message):
             mood = MOOD_AFTER_CARING[mood]
 
-    # the current line, when only the model-based classifier recognised it
+    # the current line, when only the model-based classifier recognised it as caring
     if current_intent == "caring_question" and not CARING.search(manager_messages[-1]):
         mood = MOOD_AFTER_CARING[mood]
+
+    if any(is_heavy(m) for m in manager_messages) and mood in ("neutral", "open"):
+        mood = "guarded"
 
     return mood
 
@@ -304,6 +395,12 @@ def build_safe_employee_context(employee, topics=None):
             "trend": perf["trend"],
         }
         context["goals"] = employee["goals"]
+    elif topics.get("strengths"):
+        # He knows what he has done well, and may use it to defend himself.
+        # Missed goals stay hidden unless Aditi raises performance herself.
+        context["things_you_have_done_well"] = [
+            g for g in employee["goals"] if g.get("status") != "missed"
+        ]
 
     if topics.get("lateness"):
         att = employee["attendance"]
@@ -326,15 +423,27 @@ def analyse_conversation(manager_message, conversation):
     turns = _clean_turns(conversation)
     rohit_lines = [t for s, t in turns if s == "rohit"]
     manager_lines = [t for s, t in turns if s == "manager"] + [manager_message]
+    prior_manager = manager_lines[:-1]
     rohit_text = " ".join(rohit_lines)
 
-    intent = classify_intent(manager_message)
+    topics = topics_raised(manager_message, conversation)
+    work_topic_raised = topics["lateness"] or topics["performance"]
+    tail = _format_turns(turns[-4:])
+
+    intent = classify_intent(manager_message, prior_manager, work_topic_raised, tail)
+    severe_count = sum(1 for m in prior_manager if is_heavy(m))
+
+    # Once his job is on the line he knows his own record and may defend himself with it.
+    if severe_count > 0 or intent == "heavy_news":
+        topics["strengths"] = True
+        topics["lateness"] = True
 
     state = {
         "turn_number": len(rohit_lines) + 1,
         "intent": intent,
-        "topics": topics_raised(manager_message, conversation),
+        "topics": topics,
         "mood": compute_mood(manager_lines, intent),
+        "severe_count": severe_count,
         "manager_proposes_change": _contains_any(manager_message, CHANGE_PATTERNS),
         "manager_closing": _contains_any(manager_message, CLOSING_PATTERNS),
         "manager_asked_question": _manager_asked_question(manager_message),
@@ -344,6 +453,8 @@ def analyse_conversation(manager_message, conversation):
         "questions_so_far": sum(1 for t in rohit_lines if "?" in t),
         "last_reply_had_question": bool(rohit_lines and "?" in rohit_lines[-1]),
         "last_rohit_line": rohit_lines[-1] if rohit_lines else "",
+        "recent_rohit": rohit_lines[-3:],
+        "previous_manager_line": prior_manager[-1] if prior_manager else "",
     }
 
     # Questions are rare once things are settled or right after Rohit asked one.
@@ -361,9 +472,22 @@ def analyse_conversation(manager_message, conversation):
         allow = True
     elif intent in QUESTION_FRIENDLY and not state["last_reply_had_question"]:
         allow = True
+    elif state["severe_count"] > 0 and not state["last_reply_had_question"] \
+            and not state["manager_asked_question"]:
+        allow = True
+
+    # When she asks him something, he answers; he does not ask back.
+    if intent in ("asks_input", "recall"):
+        allow = False
 
     state["allow_question"] = allow
-    state["may_hint_personal"] = state["mood"] == "open" or intent == "caring_question"
+
+    state["may_hint_personal"] = (
+        (state["mood"] == "open" or intent == "caring_question")
+        and not state["already_explained"]
+        and state["severe_count"] == 0
+        and intent != "heavy_news"
+    )
 
     return state
 
@@ -371,9 +495,25 @@ def analyse_conversation(manager_message, conversation):
 def build_stage_guidance(state):
     intent = state["intent"]
 
-    # What she just did decides first.
+    if intent == "heavy_news":
+        phase = min(state["severe_count"] + 1, 3)
+        return f"STAGE: HEAVY NEWS (time {phase}).\n{HEAVY_BASE}{HEAVY_PHASES[phase]}"
+
+    if intent == "recall":
+        previous = state["previous_manager_line"]
+        extra = (
+            f'\nThe last thing she said before this line was: "{previous}"\n'
+            "If that line was garbled or meaningless, say you did not quite catch it."
+            if previous else
+            "\nShe has not said anything substantial yet, so say so honestly."
+        )
+        return f"STAGE: RECALL.\n{INTENT_GUIDANCE['recall']}{extra}"
+
     if intent in INTENT_GUIDANCE:
         return f"STAGE: {intent.upper()}.\n{INTENT_GUIDANCE[intent]}"
+
+    if state["severe_count"] > 0:
+        return f"STAGE: AFTER SERIOUS NEWS.\n{AFTER_HEAVY_NEWS}"
 
     if state["turn_number"] == 1:
         return (
@@ -414,8 +554,8 @@ def build_stage_guidance(state):
 
     return (
         "STAGE: DISCUSSION.\n"
-        "The manager is still discussing the issue. Respond to exactly what she just said. "
-        "If she asked you a question, ANSWER it. Do not answer a question with a question. "
+        "The manager is still discussing the issue. Respond to exactly what she just said, "
+        "consistent with the facts above. If she asked you a question, ANSWER it with a statement. "
         "You may explain a little or disagree respectfully. "
         "Do not agree to a specific change until she has proposed one."
     )
@@ -434,7 +574,7 @@ def build_state_flags(state):
     yes_no = lambda v: "yes" if v else "no"
 
     return (
-        f"- Rohit's mood right now: {state['mood']}. {MOOD_GUIDANCE[state['mood']]}\n"
+        f"- Tone towards Aditi: {state['mood']}. {MOOD_GUIDANCE[state['mood']]}\n"
         f"- May hint at 'some things going on outside work' (no details): {yes_no(state['may_hint_personal'])}\n"
         f"- Rohit has already apologised: {yes_no(state['already_apologised'])}\n"
         f"- Rohit has already explained that mornings are hard: {yes_no(state['already_explained'])}\n"
@@ -449,15 +589,15 @@ def build_state_flags(state):
 # BUILD REHEARSAL PROMPT
 # =========================================================
 
-def build_rehearsal_prompt(manager_message, conversation, state=None):
+def build_rehearsal_prompt(manager_message, conversation, state, situation):
     employee = load_employee_record()
     template = load_prompt()
 
-    state = state or analyse_conversation(manager_message, conversation)
     safe_context = build_safe_employee_context(employee, state["topics"])
 
     prompt = template
     prompt = prompt.replace("{{EMPLOYEE_CONTEXT}}", json.dumps(safe_context, indent=2, ensure_ascii=False))
+    prompt = prompt.replace("{{SITUATION}}", situation)
     prompt = prompt.replace("{{CONVERSATION}}", build_conversation_history(conversation))
     prompt = prompt.replace("{{TURN_NUMBER}}", str(state["turn_number"]))
     prompt = prompt.replace("{{STATE_FLAGS}}", build_state_flags(state))
@@ -488,14 +628,22 @@ _REOPEN = re.compile(
     r"i(?:'d| would) like to (address|discuss|talk)|sorry (for|about)|apolog)",
     re.IGNORECASE,
 )
+
+# the vague personal hint, only allowed when the state says so
+_PERSONAL_HINT = re.compile(
+    r"outside (of )?work|things (going on|at home)|take my drift", re.IGNORECASE
+)
+
 SETTLED_FALLBACKS = ["Sounds good.", "Okay, that works for me.", "Alright, fair enough.", "Sure, will do."]
 
 FALLBACK_BY_INTENT = {
     "small_talk": "Doing alright, thanks.",
-    "severe": "Wait, what? Why are you saying that?",
+    "heavy_news": "Sorry, can you explain that? I'm not following.",
     "unclear": "Sorry, I didn't catch that. Can you say it again?",
     "off_topic": "Uh, sorry, what do you mean?",
     "caring_question": "I'm managing. Thanks for asking.",
+    "asks_input": "Honestly, I need a moment to think about what would actually help.",
+    "recall": "Sorry, I'm not sure I caught that properly.",
 }
 
 
@@ -504,6 +652,7 @@ def _split_sentences(text):
 
 
 def clean_rohit_response(response, state=None):
+    """Returns "" when nothing usable is left, so the caller can ask the model again."""
     if not response:
         return ""
 
@@ -532,7 +681,7 @@ def clean_rohit_response(response, state=None):
             if stripped:
                 response = stripped
 
-        if intent == "small_talk":
+        if intent in ("small_talk", "heavy_news"):
             max_sentences = 2
         elif state["already_agreed"] or state["manager_proposes_change"]:
             max_sentences = 2
@@ -540,25 +689,65 @@ def clean_rohit_response(response, state=None):
     sentences = _split_sentences(response)
 
     # ENFORCE: once he has agreed, he must not re-open the issue (normal discussion only)
-    if state and state["already_agreed"] and intent == "other":
+    if state and state["already_agreed"] and intent == "other" and state["severe_count"] == 0:
         kept = [x for x in sentences if not _REOPEN.search(x)]
         if not kept:
             kept = [SETTLED_FALLBACKS[state["turn_number"] % len(SETTLED_FALLBACKS)]]
         sentences = kept
 
+    # ENFORCE: the vague "things outside work" hint is only allowed when the state says so
+    if state and not state["may_hint_personal"]:
+        no_hint = [s for s in sentences if not _PERSONAL_HINT.search(s)]
+        if no_hint:
+            sentences = no_hint
+
     # ENFORCE: a real employee does not end every turn with a question
     if state and not state["allow_question"]:
         statements = [s for s in sentences if not s.rstrip().endswith("?")]
-        sentences = statements if statements else [FALLBACK_ACCEPTANCE]
+        if not statements:
+            return ""          # only questions: let the caller try again instead of using a canned line
+        sentences = statements
 
     return " ".join(sentences[:max_sentences]).strip()
+
+
+# =========================================================
+# REPEAT CHECK
+# =========================================================
+
+def _words(text):
+    return re.findall(r"[a-z']+", text.lower())
+
+
+def too_similar(new, recent):
+    nw = _words(new)
+
+    for old in recent:
+        ow = _words(old)
+        if not nw or not ow:
+            continue
+        if nw[:2] == ow[:2]:
+            return True
+        a, b = set(nw), set(ow)
+        if len(a & b) / len(a | b) > 0.6:
+            return True
+
+    return False
+
+
+def pick_fallback(state):
+    if state["intent"] in FALLBACK_BY_INTENT:
+        return FALLBACK_BY_INTENT[state["intent"]]
+    if state["severe_count"] > 0:
+        return "I need a minute to take this in."
+    return NEUTRAL_FALLBACK
 
 
 # =========================================================
 # GET ROHIT RESPONSE
 # =========================================================
 
-def get_rohit_response(manager_message, conversation):
+def get_rohit_response(manager_message, conversation, session_id=None):
     manager_message = str(manager_message or "").strip()
 
     if not manager_message:
@@ -567,30 +756,68 @@ def get_rohit_response(manager_message, conversation):
     if not isinstance(conversation, list):
         raise ValueError("Conversation must be a list.")
 
+    # ---- meeting memory (lives only while this meeting is running) ----
+    situation = "Nothing has been established yet."
+
+    if session_id:
+        wait_for_update(session_id)
+        snapshot = get_snapshot(session_id)
+
+        if snapshot["turns"] == 0 and conversation:
+            rebuild_from_conversation(session_id, conversation)
+            snapshot = get_snapshot(session_id)
+
+        situation = format_for_prompt(snapshot)
+
     state = analyse_conversation(manager_message, conversation)
-    prompt = build_rehearsal_prompt(manager_message, conversation, state)
+    prompt = build_rehearsal_prompt(manager_message, conversation, state, situation)
 
     print("\n" + "=" * 70)
     print("MANAGER:", manager_message)
-    print("STATE:", {k: v for k, v in state.items() if k != "last_rohit_line"})
+    print("STATE:", {k: v for k, v in state.items()
+                     if k not in ("last_rohit_line", "recent_rohit", "previous_manager_line")})
+    print("MEMORY:", situation.replace("\n", " | "))
 
     response = ""
-    for attempt in range(2):
+    retry_note = ""
+
+    for attempt in range(3):
         raw = generate_response(
-            prompt,
-            temperature=0.8,
+            prompt + retry_note,
+            temperature=0.8 if attempt == 0 else 0.9,
             max_tokens=120,
             provider=ROHIT_PROVIDER,
         )
-        response = clean_rohit_response(raw, state)
-        if response:
+
+        candidate = clean_rohit_response(raw, state)
+
+        if not candidate:
+            print(f"Unusable reply (attempt {attempt + 1}), retrying...")
+            retry_note = (
+                "\n\nIMPORTANT: your last attempt was unusable (empty, or only a question where a "
+                "question is not allowed). Reply with one or two plain statements that answer what "
+                "she just said."
+            )
+            continue
+
+        response = candidate
+
+        if not too_similar(candidate, state["recent_rohit"]):
             break
-        print(f"Empty reply after cleaning (attempt {attempt + 1}), retrying...")
+
+        print(f"Reply too similar to a recent one (attempt {attempt + 1}), retrying...")
+        retry_note = (
+            "\n\nIMPORTANT: your last attempt repeated wording you already used. "
+            "Say something clearly different, with a different opening."
+        )
 
     if not response:
-        response = FALLBACK_BY_INTENT.get(state["intent"], FALLBACK_ACCEPTANCE)
+        response = pick_fallback(state)
 
     print("ROHIT:", response)
     print("=" * 70)
+
+    if session_id:
+        update_async(session_id, manager_message, response)
 
     return response

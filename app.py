@@ -3,10 +3,10 @@ from flask import Flask, render_template, request, jsonify
 from services.prepare_service import prepare_feedback
 from services.conversation_service import get_rohit_response
 from services.debrief_service import generate_debrief
-
-from flask import request, jsonify
 from services.transcription_service import transcribe_audio
 from services.tts_service import generate_speech
+from services.meeting_memory import end_session
+
 app = Flask(__name__)
 
 
@@ -44,6 +44,7 @@ def rehearse():
 
     manager_message = str(data.get("message", "")).strip()
     conversation = data.get("conversation", [])
+    session_id = str(data.get("session_id") or "").strip() or None
 
     if not manager_message:
         return jsonify({"error": "Manager message cannot be empty."}), 400
@@ -52,13 +53,21 @@ def rehearse():
         return jsonify({"error": "Conversation must be a list."}), 400
 
     try:
-        response = get_rohit_response(manager_message, conversation)
+        response = get_rohit_response(manager_message, conversation, session_id)
         return jsonify({"speaker": "rohit", "response": response})
 
     except Exception as error:
         print("\nRehearse error:")
         print(error)
         return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/rehearse/end", methods=["POST"])
+def end_rehearsal():
+    # sendBeacon posts the JSON as a Blob, so parse it even if the content type differs
+    data = request.get_json(silent=True, force=True) or {}
+    end_session(str(data.get("session_id") or "").strip())
+    return jsonify({"ok": True})
 
 
 @app.route("/api/debrief", methods=["POST"])
@@ -79,6 +88,7 @@ def debrief():
         print(error)
         return jsonify({"error": str(error)}), 500
 
+
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe():
     if "audio" not in request.files:
@@ -95,6 +105,7 @@ def transcribe():
     except Exception as error:
         print("Transcription error:", error)
         return jsonify({"error": str(error)}), 500
+
 
 @app.route("/api/tts", methods=["POST"])
 def text_to_speech():
@@ -116,5 +127,7 @@ def text_to_speech():
     except Exception as error:
         app.logger.exception("Orpheus TTS failed")
         return jsonify({"error": str(error)}), 500
+
+
 if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=5000)

@@ -1,24 +1,25 @@
-
 "use strict";
 
 // =========================================================
 // MANAGER FEEDBACK COACH
 // STT: Whisper via Flask /api/transcribe
 // TTS: Groq Orpheus via Flask /api/tts
+// Rehearsal memory: per-meeting, kept on the server, deleted when the meeting ends
 // =========================================================
 
 // CONFIG
 
 const CONFIG = {
     RECOGNITION_LANG: "en-IN",
-    SILENCE_MS: 800,
-    SILENCE_MS_SHORT: 1000,
-    SILENCE_MS_UNFINISHED: 1400,
+    SILENCE_MS: 2000,
+    SILENCE_MS_SHORT: 3000,
+    SILENCE_MS_UNFINISHED: 3500,
     SHORT_TURN_WORDS: 5,
     BARGE_IN_MIN_WORDS: 2,
     MAX_RECORDING_MS: 30000,
     SPEECH_THRESHOLD: 0.025,
-    TTS_ENDPOINT: "/api/tts"
+    TTS_ENDPOINT: "/api/tts",
+    REHEARSE_END_ENDPOINT: "/api/rehearse/end"
 };
 
 const UNFINISHED_ENDINGS = new Set([
@@ -39,6 +40,7 @@ let currentMode = "rehearse";
 let meetingActive = false;
 let isGeneratingResponse = false;
 let meetingSessionId = 0;
+let meetingId = null;          // unique id sent to the server for this meeting's memory
 let debriefRequestId = 0;
 
 let recognitionSupported = false;
@@ -981,6 +983,35 @@ function setupRehearsal() {
 }
 
 // =========================================================
+// REHEARSAL MEMORY (server side, per meeting)
+// =========================================================
+
+function newMeetingId() {
+    return (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `m-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+// Tells the server to delete everything it remembers about this meeting.
+// sendBeacon keeps working even while the tab is closing.
+function endRehearsalMemory() {
+    if (!meetingId) return;
+
+    const payload = new Blob(
+        [JSON.stringify({ session_id: meetingId })],
+        { type: "application/json" }
+    );
+
+    try {
+        navigator.sendBeacon(CONFIG.REHEARSE_END_ENDPOINT, payload);
+    } catch (error) {
+        console.warn("Could not clear rehearsal memory:", error);
+    }
+
+    meetingId = null;
+}
+
+// =========================================================
 // CONVERSATION WITH ROHIT
 // =========================================================
 
@@ -1059,7 +1090,8 @@ async function sendManagerMessage(message) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 message,
-                conversation: previousConversation
+                conversation: previousConversation,
+                session_id: meetingId
             })
         });
 
@@ -1095,7 +1127,7 @@ async function sendManagerMessage(message) {
 
         updateTurnStatus(
             "Something went wrong",
-            "Check Flask, the API route, and Ollama."
+            "Check Flask, the API route, and the language model."
         );
 
         updateVoiceStatus("Error");
@@ -1112,10 +1144,6 @@ async function sendManagerMessage(message) {
 // =========================================================
 // ROHIT TEXT-TO-SPEECH — ORPHEUS
 // =========================================================
-
- // =========================================================
- // ROHIT TEXT-TO-SPEECH — ORPHEUS
- // =========================================================
 
 function speakEmployeeResponse(text, turn, element) {
     const generationId = ++speechGenerationId;
@@ -1251,6 +1279,10 @@ function startMeeting() {
     meetingSessionId++;
     debriefRequestId++;
 
+    // Clear any leftover memory, then start a fresh one for this meeting.
+    endRehearsalMemory();
+    meetingId = newMeetingId();
+
     meetingActive = true;
     isGeneratingResponse = false;
     conversation = [];
@@ -1334,6 +1366,9 @@ function endMeeting() {
     meetingSessionId++;
     meetingActive = false;
     isGeneratingResponse = false;
+
+    // The meeting is over: delete the server-side memory for it.
+    endRehearsalMemory();
 
     markRohitInterrupted();
     stopRohitSpeaking();
@@ -1613,7 +1648,9 @@ window.addEventListener("beforeunload", () => {
     meetingActive = false;
     recognitionShouldRun = false;
 
+    // Closing or reloading the tab ends the meeting: delete its memory.
+    endRehearsalMemory();
+
     stopRohitSpeaking();
     stopRecognition();
 });
-    
